@@ -1,0 +1,9 @@
+Booking Amendment Notice
+
+Booking Reference: DEMO-003
+Carrier: Demo Line
+Revision: 2
+
+Minor schedule update.
+
+CY Cutoff: 2026-10-15 18:00

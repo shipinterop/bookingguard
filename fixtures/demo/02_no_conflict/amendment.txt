@@ -1,0 +1,11 @@
+Booking Amendment Notice
+
+Booking Reference: DEMO-002
+Carrier: Demo Line
+Revision: 2
+
+Weight has been updated.
+
+CY Cutoff: 2026-10-15T18:00:00+09:00
+
+Weight: 23000 KG
