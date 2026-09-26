@@ -4,13 +4,17 @@ from __future__ import annotations
 
 from bookingguard.domain.models import (
     Action,
+    Document,
+    EvidenceRef,
     ExtractedFact,
     RuleFinding,
     RunResult,
     ShipmentIdentity,
     ValueRole,
+    VerifiedEvidence,
     Verdict,
 )
+from bookingguard.evidence.verify import verify_evidence
 from bookingguard.ingest.plan_csv import PlanCSVError, parse_plan_csv
 from bookingguard.ingest.text import ingest_text
 from bookingguard.rules.cy_cutoff import evaluate_cy_cutoff
@@ -35,8 +39,8 @@ def analyze_booking_change(
     amendment_doc = ingest_text(amendment_text, "amendment.txt")
 
     # 2. Extract facts (deterministic heuristic for MVP)
-    original_facts = _extract_facts_heuristic(original_doc.document_id, original_text)
-    amendment_facts = _extract_facts_heuristic(amendment_doc.document_id, amendment_text)
+    original_facts = _extract_facts_heuristic(original_doc)
+    amendment_facts = _extract_facts_heuristic(amendment_doc)
 
     # Determine booking reference
     ref = booking_reference
@@ -68,7 +72,14 @@ def analyze_booking_change(
             ],
         )
 
-    identity = ShipmentIdentity(booking_reference=ref)
+    # Extract carrier namespace
+    carrier_ns = ""
+    for f in original_facts + amendment_facts:
+        if f.field_name == "carrier":
+            carrier_ns = f.value.strip().lower().replace(" ", "_")
+            break
+
+    identity = ShipmentIdentity(booking_reference=ref, carrier_namespace=carrier_ns)
 
     # 3. Reconstruct state
     state, warnings = reconstruct_state(identity, original_facts, amendment_facts)
@@ -87,8 +98,19 @@ def analyze_booking_change(
             errors=[f"Plan CSV error: {e}"],
         )
 
-    # 5. Match plan to booking
+    # 5. Match plan to booking (by reference + carrier when available)
     matched_plans = [p for p in plans if p.booking_reference == ref]
+    if carrier_ns and matched_plans:
+        carrier_filtered = [
+            p for p in matched_plans if p.carrier_namespace == carrier_ns
+        ]
+        if carrier_filtered:
+            matched_plans = carrier_filtered
+        else:
+            errors.append(
+                f"Carrier namespace '{carrier_ns}' not found in plans; "
+                f"matching by booking reference only."
+            )
     if not matched_plans:
         return RunResult(
             booking_reference=ref,
@@ -133,7 +155,27 @@ def analyze_booking_change(
             )
             findings.append(finding)
 
-    # 8. Overall verdict
+    # 8. Verify evidence from extracted facts
+    all_facts = original_facts + amendment_facts
+    docs_by_id = {
+        original_doc.document_id: original_doc,
+        amendment_doc.document_id: amendment_doc,
+    }
+    verified: list[VerifiedEvidence] = []
+    for fact in all_facts:
+        if fact.evidence is None:
+            continue
+        doc = docs_by_id.get(fact.source_document_id)
+        if doc is None:
+            continue
+        ve = verify_evidence(doc, fact.evidence.quote, fact.evidence.block_id)
+        verified.append(ve)
+        if not ve.verified:
+            errors.append(
+                f"Evidence verification failed for {fact.field_name}: {ve.reason}"
+            )
+
+    # 9. Overall verdict
     if any(f.verdict == Verdict.CONFLICT for f in findings):
         verdict = Verdict.CONFLICT
     elif any(f.verdict == Verdict.NEEDS_REVIEW for f in findings):
@@ -149,18 +191,19 @@ def analyze_booking_change(
         after=after,
         findings=findings,
         verdict=verdict,
+        evidence=verified,
         errors=errors,
     )
 
 
-def _extract_facts_heuristic(
-    document_id: str, text: str
-) -> list[ExtractedFact]:
+def _extract_facts_heuristic(doc: Document) -> list[ExtractedFact]:
     """Simple line-based extraction for structured fixtures.
 
     Looks for patterns like:
       Booking Reference: DEMO-001
       CY Cutoff: 2026-10-15T18:00:00+09:00
+
+    Attaches evidence references (block_id + quote) for each extracted fact.
     """
     facts: list[ExtractedFact] = []
     field_map = {
@@ -169,28 +212,34 @@ def _extract_facts_heuristic(
         "cy cutoff": "cy_cutoff",
         "cy cut-off": "cy_cutoff",
         "revision": "revision",
+        "carrier": "carrier",
     }
 
-    for line in text.splitlines():
-        line_stripped = line.strip()
-        if ":" not in line_stripped:
-            continue
-        key, _, val = line_stripped.partition(":")
-        key_lower = key.strip().lower()
-        val = val.strip()
-        if not val:
-            continue
+    for block in doc.blocks:
+        for line in block.text.splitlines():
+            line_stripped = line.strip()
+            if ":" not in line_stripped:
+                continue
+            key, _, val = line_stripped.partition(":")
+            key_lower = key.strip().lower()
+            val = val.strip()
+            if not val:
+                continue
 
-        field_name = field_map.get(key_lower)
-        if field_name is not None:
-            facts.append(
-                ExtractedFact(
-                    field_name=field_name,
-                    value=val,
-                    value_role=ValueRole.CURRENT,
-                    action=Action.SET,
-                    source_document_id=document_id,
+            field_name = field_map.get(key_lower)
+            if field_name is not None:
+                facts.append(
+                    ExtractedFact(
+                        field_name=field_name,
+                        value=val,
+                        value_role=ValueRole.CURRENT,
+                        action=Action.SET,
+                        source_document_id=doc.document_id,
+                        evidence=EvidenceRef(
+                            block_id=block.block_id,
+                            quote=line_stripped,
+                        ),
+                    )
                 )
-            )
 
     return facts
