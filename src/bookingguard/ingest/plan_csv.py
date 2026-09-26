@@ -39,8 +39,10 @@ def parse_plan_csv(csv_text: str) -> list[GateInPlan]:
     plans: list[GateInPlan] = []
     for i, row in enumerate(reader, start=2):
         try:
-            gate_in_str = row["planned_gate_in_at"].strip()
-            planned_gate_in_at = datetime.fromisoformat(gate_in_str)
+            raw = row.get("planned_gate_in_at")
+            if raw is None or raw.strip() == "":
+                raise PlanCSVError(f"Row {i}: planned_gate_in_at is missing or empty.")
+            planned_gate_in_at = datetime.fromisoformat(raw.strip())
         except (ValueError, KeyError) as e:
             raise PlanCSVError(f"Row {i}: invalid planned_gate_in_at — {e}")
 

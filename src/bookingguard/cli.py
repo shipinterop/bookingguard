@@ -59,15 +59,21 @@ def _run_analyze(args: argparse.Namespace) -> int:
             print(f"  After : {result.after['cy_cutoff']}")
         print()
 
-    for finding in result.findings:
-        verdict_label = finding.verdict.value.upper().replace("_", " ")
+    if result.findings:
+        for finding in result.findings:
+            verdict_label = finding.verdict.value.upper().replace("_", " ")
+            print(f"RESULT: {verdict_label}")
+            if finding.delta_hours is not None:
+                print(f"  Delta: {finding.delta_hours:+.1f}h")
+            if finding.detail:
+                print(f"  Detail: {finding.detail}")
+            if finding.needs_review_reasons:
+                print(f"  Review reasons: {', '.join(finding.needs_review_reasons)}")
+            print()
+    else:
+        # P1: Always print the overall verdict even when no findings
+        verdict_label = result.verdict.value.upper().replace("_", " ")
         print(f"RESULT: {verdict_label}")
-        if finding.delta_hours is not None:
-            print(f"  Delta: {finding.delta_hours:+.1f}h")
-        if finding.detail:
-            print(f"  Detail: {finding.detail}")
-        if finding.needs_review_reasons:
-            print(f"  Review reasons: {', '.join(finding.needs_review_reasons)}")
         print()
 
     if result.errors:
@@ -75,7 +81,12 @@ def _run_analyze(args: argparse.Namespace) -> int:
         for err in result.errors:
             print(f"  - {err}")
 
-    return 0 if result.verdict != Verdict.CONFLICT else 1
+    # Nonzero exit for conflict or needs_review (analysis incomplete)
+    if result.verdict == Verdict.CONFLICT:
+        return 1
+    if result.verdict == Verdict.NEEDS_REVIEW:
+        return 2
+    return 0
 
 
 if __name__ == "__main__":

@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from bookingguard.application.analyze import analyze_booking_change
 from bookingguard.domain.models import Verdict
 
@@ -45,4 +47,25 @@ def test_03_needs_review():
     assert result.booking_reference == expected["booking_reference"]
 
 
-import pytest
+VALID_PLAN = """\
+plan_id,booking_reference,carrier_namespace,leg_id,terminal_id,container_reference,planned_gate_in_at,event_semantics
+PLAN-001,DEMO-001,demo_line,LEG-1,KRPUS-T1,DEMO1234567,2026-10-15T10:00:00+09:00,gate_in_completed
+"""
+
+
+def test_different_booking_needs_review():
+    """P1: Amendment for a different booking => needs_review."""
+    original = "Booking Reference: DEMO-001\nCY Cutoff: 2026-10-15T18:00:00+09:00\n"
+    amendment = "Booking Reference: DEMO-999\nCY Cutoff: 2026-10-14T18:00:00+09:00\n"
+    result = analyze_booking_change(original, amendment, VALID_PLAN)
+    assert result.verdict == Verdict.NEEDS_REVIEW
+    assert any("mismatch" in e.lower() for e in result.errors)
+
+
+def test_no_matching_plan_needs_review():
+    """No plan for this booking => needs_review."""
+    original = "Booking Reference: DEMO-XXX\nCY Cutoff: 2026-10-15T18:00:00+09:00\n"
+    amendment = "Booking Reference: DEMO-XXX\nCY Cutoff: 2026-10-14T18:00:00+09:00\n"
+    result = analyze_booking_change(original, amendment, VALID_PLAN)
+    assert result.verdict == Verdict.NEEDS_REVIEW
+    assert any("No plan found" in e for e in result.errors)

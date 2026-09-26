@@ -40,13 +40,33 @@ def analyze_booking_change(
 
     # Determine booking reference
     ref = booking_reference
+    original_ref = None
+    amendment_ref = None
+    for f in original_facts:
+        if f.field_name == "booking_reference":
+            original_ref = f.value
+    for f in amendment_facts:
+        if f.field_name == "booking_reference":
+            amendment_ref = f.value
+
     if ref is None:
-        for f in original_facts + amendment_facts:
-            if f.field_name == "booking_reference":
-                ref = f.value
-                break
-    if ref is None:
-        ref = "UNKNOWN"
+        ref = original_ref or amendment_ref or "UNKNOWN"
+
+    # P1: Reject amendments for a different booking
+    if (
+        original_ref is not None
+        and amendment_ref is not None
+        and original_ref != amendment_ref
+    ):
+        return RunResult(
+            booking_reference=ref,
+            original_document_id=original_doc.document_id,
+            amendment_document_id=amendment_doc.document_id,
+            verdict=Verdict.NEEDS_REVIEW,
+            errors=[
+                f"Booking reference mismatch: original={original_ref}, amendment={amendment_ref}."
+            ],
+        )
 
     identity = ShipmentIdentity(booking_reference=ref)
 
