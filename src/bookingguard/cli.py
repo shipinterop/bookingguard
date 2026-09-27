@@ -49,15 +49,32 @@ def _read_file(path: Path, label: str) -> str | None:
     return None
 
 
+def _file_error_json(label: str, path: Path, error: str) -> None:
+    """Print a JSON error result for file-read failures."""
+    from bookingguard.domain.models import ProcessingStatus, RunResult, Verdict
+    result = RunResult(
+        processing_status=ProcessingStatus.FAILED,
+        verdict=Verdict.NEEDS_REVIEW,
+        errors=[f"{label} file error: {error}"],
+    )
+    print(result.model_dump_json(indent=2))
+
+
 def _run_analyze(args: argparse.Namespace) -> int:
     original_text = _read_file(args.original, "original")
     if original_text is None:
+        if args.json_output:
+            _file_error_json("original", args.original, "file not readable")
         return 3
     amendment_text = _read_file(args.amendment, "amendment")
     if amendment_text is None:
+        if args.json_output:
+            _file_error_json("amendment", args.amendment, "file not readable")
         return 3
     plan_csv = _read_file(args.plan, "plan")
     if plan_csv is None:
+        if args.json_output:
+            _file_error_json("plan", args.plan, "file not readable")
         return 3
 
     result = analyze_booking_change(
