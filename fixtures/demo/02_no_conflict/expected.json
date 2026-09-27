@@ -1,0 +1,18 @@
+{
+  "booking_reference": "DEMO-002",
+  "verdict": "no_conflict_detected",
+  "before": {
+    "cy_cutoff": "2026-10-15T18:00:00+09:00"
+  },
+  "after": {
+    "cy_cutoff": "2026-10-15T18:00:00+09:00"
+  },
+  "findings": [
+    {
+      "rule": "cy_cutoff",
+      "verdict": "no_conflict_detected",
+      "delta_hours": -8.0,
+      "detail": "Planned gate-in is 8.0h before CY cutoff."
+    }
+  ]
+}

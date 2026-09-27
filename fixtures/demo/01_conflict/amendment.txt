@@ -1,0 +1,11 @@
+Booking Amendment Notice
+
+Booking Reference: DEMO-001
+Carrier: Demo Line
+Revision: 2
+
+The CY cutoff has been advanced. Please note the updated schedule.
+
+CY Cutoff: 2026-10-14T18:00:00+09:00
+
+All other terms remain unchanged.

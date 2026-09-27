@@ -1,0 +1,11 @@
+{
+  "booking_reference": "DEMO-003",
+  "verdict": "needs_review",
+  "findings": [
+    {
+      "rule": "cy_cutoff",
+      "verdict": "needs_review",
+      "needs_review_reasons": ["cy_cutoff has no timezone info"]
+    }
+  ]
+}

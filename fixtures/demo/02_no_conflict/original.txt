@@ -1,0 +1,14 @@
+Booking Confirmation
+
+Booking Reference: DEMO-002
+Carrier: Demo Line
+Revision: 1
+
+Vessel: MV EXAMPLE
+Voyage: 2026W42
+Port of Loading: KRPUS (Busan)
+
+CY Cutoff: 2026-10-15T18:00:00+09:00
+
+Container: DEMO7654321
+Weight: 22000 KG
