@@ -96,9 +96,17 @@ def analyze_booking_change(
 
     ref = booking_reference or doc_ref or "UNKNOWN"
 
-    # 4. Extract carrier namespace — check both documents agree
-    original_carrier = _get_fact_value(original_facts, "carrier")
-    amendment_carrier = _get_fact_value(amendment_facts, "carrier")
+    # 4. Extract carrier namespace — check for ambiguity within and across documents
+    original_carriers = _get_all_fact_values(original_facts, "carrier")
+    amendment_carriers = _get_all_fact_values(amendment_facts, "carrier")
+
+    if len(set(c.strip().lower() for c in original_carriers)) > 1:
+        return _fail(f"Original document contains conflicting carriers: {original_carriers}.")
+    if len(set(c.strip().lower() for c in amendment_carriers)) > 1:
+        return _fail(f"Amendment document contains conflicting carriers: {amendment_carriers}.")
+
+    original_carrier = original_carriers[0] if original_carriers else None
+    amendment_carrier = amendment_carriers[0] if amendment_carriers else None
 
     if (
         original_carrier is not None
@@ -267,14 +275,14 @@ def analyze_booking_change(
             )
             findings.append(finding)
 
-    # 12. Overall verdict — blocking warnings or incomplete extraction force needs_review
-    if any(f.verdict == Verdict.CONFLICT for f in findings):
+    # 12. Overall verdict
+    # Extraction incomplete always forces needs_review — even over conflict,
+    # because the conflict may be based on stale data
+    if extraction_incomplete or blocking_warnings:
+        verdict = Verdict.NEEDS_REVIEW
+    elif any(f.verdict == Verdict.CONFLICT for f in findings):
         verdict = Verdict.CONFLICT
-    elif (
-        any(f.verdict == Verdict.NEEDS_REVIEW for f in findings)
-        or blocking_warnings
-        or extraction_incomplete
-    ):
+    elif any(f.verdict == Verdict.NEEDS_REVIEW for f in findings):
         verdict = Verdict.NEEDS_REVIEW
     else:
         verdict = Verdict.NO_CONFLICT_DETECTED

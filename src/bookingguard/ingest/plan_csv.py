@@ -24,6 +24,13 @@ class PlanCSVError(Exception):
     """Raised on CSV parsing errors."""
 
 
+def _parse_iso_datetime(s: str) -> datetime:
+    """Parse ISO datetime, handling 'Z' suffix on Python 3.10."""
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    return datetime.fromisoformat(s)
+
+
 def _safe_strip(value: str | None, field: str, row_num: int) -> str:
     """Strip a value, raising PlanCSVError if None."""
     if value is None:
@@ -64,7 +71,7 @@ def parse_plan_csv(csv_text: str) -> list[GateInPlan]:
             raw = row.get("planned_gate_in_at")
             if raw is None or raw.strip() == "":
                 raise PlanCSVError(f"Row {i}: planned_gate_in_at is missing or empty.")
-            planned_gate_in_at = datetime.fromisoformat(raw.strip())
+            planned_gate_in_at = _parse_iso_datetime(raw.strip())
         except ValueError as e:
             raise PlanCSVError(f"Row {i}: invalid planned_gate_in_at — {e}")
 

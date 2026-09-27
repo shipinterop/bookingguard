@@ -54,6 +54,23 @@ def reconstruct_state(
                 )
             )
 
+    # Detect conflicting values within amendment for critical fields
+    amendment_values: dict[str, set[str]] = {}
+    for fact in amendment_facts:
+        if fact.field_name not in amendment_values:
+            amendment_values[fact.field_name] = set()
+        amendment_values[fact.field_name].add(fact.value)
+
+    for field_name, values in amendment_values.items():
+        if len(values) > 1:
+            warnings.append(
+                ReconstructionWarning(
+                    reason=f"Amendment has conflicting values for '{field_name}': "
+                    f"{sorted(values)}. Cannot determine which is current.",
+                    blocking=True,
+                )
+            )
+
     # Apply amendment facts with safety checks
     for fact in amendment_facts:
         # Reject non-CURRENT value roles
@@ -67,16 +84,13 @@ def reconstruct_state(
             )
             continue
 
-        # Reject container-specific scope applied to booking-wide state
-        if (
-            fact.scope.type != "booking_all"
-            and fact.scope.container_reference is not None
-        ):
+        # Reject non-booking scope — with or without container reference
+        if fact.scope.type != "booking_all":
             warnings.append(
                 ReconstructionWarning(
-                    reason=f"Amendment fact '{fact.field_name}' has container-specific "
-                    f"scope ({fact.scope.container_reference}) — not applied to "
-                    f"booking-wide state. Needs review.",
+                    reason=f"Amendment fact '{fact.field_name}' has non-booking scope "
+                    f"(type='{fact.scope.type}', container={fact.scope.container_reference}) "
+                    f"— not applied to booking-wide state. Needs review.",
                     blocking=True,
                 )
             )
@@ -104,7 +118,10 @@ def reconstruct_state(
     cutoff_fact = merged.get("cy_cutoff")
     if cutoff_fact is not None:
         try:
-            state.cy_cutoff = datetime.fromisoformat(cutoff_fact.value)
+            val = cutoff_fact.value
+            if val.endswith("Z"):
+                val = val[:-1] + "+00:00"
+            state.cy_cutoff = datetime.fromisoformat(val)
         except ValueError:
             warnings.append(
                 ReconstructionWarning(

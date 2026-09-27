@@ -371,3 +371,83 @@ def test_processing_status_on_csv_error():
     result = analyze_booking_change(original, amendment, "not,a,valid,csv\n")
     assert result.processing_status == ProcessingStatus.FAILED
     assert result.verdict == Verdict.NEEDS_REVIEW
+
+
+# ─── 6. Codex round 3 safety fixes ───
+
+
+def test_conflicting_cutoffs_in_amendment():
+    """Amendment with two different CY Cutoff values → needs_review."""
+    original = "Booking Reference: DEMO-001\nCY Cutoff: 2026-10-15T18:00:00+09:00\n"
+    amendment = (
+        "Booking Reference: DEMO-001\n"
+        "CY Cutoff: 2026-10-14T18:00:00+09:00\n\n"
+        "CY Cutoff: 2026-10-16T18:00:00+09:00\n"
+    )
+    result = analyze_booking_change(original, amendment, PLAN_DEMO_001)
+    assert result.verdict == Verdict.NEEDS_REVIEW
+
+
+def test_conflicting_carriers_in_document():
+    """Document with two different carriers → needs_review."""
+    original = (
+        "Booking Reference: DEMO-001\n"
+        "Carrier: Demo Line\n"
+        "Carrier: Other Line\n"
+        "CY Cutoff: 2026-10-15T18:00:00+09:00\n"
+    )
+    amendment = "Booking Reference: DEMO-001\nCY Cutoff: 2026-10-14T18:00:00+09:00\n"
+    result = analyze_booking_change(original, amendment, PLAN_DEMO_001)
+    assert result.verdict == Verdict.NEEDS_REVIEW
+    assert any("carrier" in e.lower() for e in result.errors)
+
+
+def test_incomplete_extraction_overrides_conflict():
+    """When extraction is incomplete, verdict must be needs_review even if stale cutoff conflicts."""
+    original = "Booking Reference: DEMO-001\nCY Cutoff: 2026-10-14T18:00:00+09:00\n"
+    # Amendment mentions cutoff change in prose but heuristic can't parse it
+    amendment = "Booking Reference: DEMO-001\nThe CY receiving deadline has been extended to 2026-10-20.\n"
+    result = analyze_booking_change(original, amendment, PLAN_DEMO_001)
+    # The stale cutoff (10/14) would conflict with gate-in (10/15),
+    # but extraction is incomplete so verdict must be needs_review
+    assert result.verdict == Verdict.NEEDS_REVIEW
+    assert result.processing_status == ProcessingStatus.PARTIAL
+
+
+def test_z_timestamp_in_csv():
+    """UTC 'Z' suffix in CSV should be accepted."""
+    plan_z = """\
+plan_id,booking_reference,carrier_namespace,leg_id,terminal_id,container_reference,planned_gate_in_at,event_semantics
+PLAN-001,DEMO-001,demo_line,LEG-1,KRPUS-T1,DEMO1234567,2026-10-15T01:00:00Z,gate_in_completed
+"""
+    original = "Booking Reference: DEMO-001\nCY Cutoff: 2026-10-15T18:00:00+09:00\n"
+    amendment = "Booking Reference: DEMO-001\nCY Cutoff: 2026-10-15T18:00:00+09:00\n"
+    result = analyze_booking_change(original, amendment, plan_z)
+    # Should not fail with CSV error
+    assert result.processing_status != ProcessingStatus.FAILED
+
+
+def test_non_booking_scope_without_container_blocked():
+    """Scope type='container' without container_reference must still be blocked."""
+    identity = ShipmentIdentity(booking_reference="TEST")
+    original = [
+        ExtractedFact(
+            field_name="cy_cutoff",
+            value="2026-10-14T18:00:00+09:00",
+            value_role=ValueRole.CURRENT,
+            action=Action.SET,
+        )
+    ]
+    amendment = [
+        ExtractedFact(
+            field_name="cy_cutoff",
+            value="2026-10-16T18:00:00+09:00",
+            value_role=ValueRole.CURRENT,
+            action=Action.SET,
+            scope=Scope(type="container", container_reference=None),
+        )
+    ]
+    state, warnings = reconstruct_state(identity, original, amendment)
+    # Original must be preserved — non-booking scope without container is unsafe
+    assert state.cy_cutoff == datetime(2026, 10, 14, 18, 0, tzinfo=KST)
+    assert any("non-booking" in w.reason.lower() or "scope" in w.reason.lower() for w in warnings)

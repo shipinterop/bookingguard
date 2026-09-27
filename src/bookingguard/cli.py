@@ -74,21 +74,23 @@ def _run_analyze(args: argparse.Namespace) -> int:
             print(f"  After : {result.after['cy_cutoff']}")
         print()
 
+    # Always print aggregate verdict first
+    agg_label = result.verdict.value.upper().replace("_", " ")
+    print(f"VERDICT: {agg_label}")
+    print()
+
+    # Then print individual findings if any
     if result.findings:
         for finding in result.findings:
-            verdict_label = finding.verdict.value.upper().replace("_", " ")
-            print(f"RESULT: {verdict_label}")
+            finding_label = finding.verdict.value.upper().replace("_", " ")
+            print(f"  Finding: {finding_label}")
             if finding.delta_hours is not None:
-                print(f"  Delta: {finding.delta_hours:+.1f}h")
+                print(f"    Delta: {finding.delta_hours:+.1f}h")
             if finding.detail:
-                print(f"  Detail: {finding.detail}")
+                print(f"    Detail: {finding.detail}")
             if finding.needs_review_reasons:
-                print(f"  Review reasons: {', '.join(finding.needs_review_reasons)}")
+                print(f"    Review reasons: {', '.join(finding.needs_review_reasons)}")
             print()
-    else:
-        verdict_label = result.verdict.value.upper().replace("_", " ")
-        print(f"RESULT: {verdict_label}")
-        print()
 
     # Show evidence
     verified_evidence = [e for e in result.evidence if e.verified]
