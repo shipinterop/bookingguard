@@ -135,17 +135,22 @@ def check_value_in_evidence(fact: CandidateFact) -> str | None:
         if time_match:
             time_str = time_match.group(1)  # e.g. "18:00:59" or "18:00"
             if time_str not in quote:
-                # If value has seconds, also try without seconds as fallback
-                if ":" in time_str and time_str.count(":") == 2:
+                # If value has seconds, try without seconds
+                if time_str.count(":") == 2:
                     short_time = time_str[:5]  # "18:00"
+                    seconds = time_str[6:]     # "59" or "00"
                     if short_time not in quote:
                         return f"Time from value ({time_str}) not found in quote."
-                    # Short time matches but full time doesn't — seconds differ
-                    return (
-                        f"Time with seconds ({time_str}) does not match quote. "
-                        f"Only {short_time} found."
-                    )
-                return f"Time from value ({time_str}) not found in quote."
+                    # Quote has only HH:MM — accept if seconds are "00"
+                    # (normalized zero seconds matches minute-precision quote)
+                    if seconds != "00":
+                        return (
+                            f"Time with seconds ({time_str}) does not match quote. "
+                            f"Only {short_time} found."
+                        )
+                    # seconds == "00" and short_time matches → OK
+                else:
+                    return f"Time from value ({time_str}) not found in quote."
 
         # Check timezone consistency
         value_tz = re.search(r"([+-]\d{2}:\d{2}|Z)$", value)

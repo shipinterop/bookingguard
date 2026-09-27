@@ -255,6 +255,19 @@ def test_value_evidence_timezone_mismatch():
     assert "timezone" in result.lower() or "Timezone" in result
 
 
+def test_value_evidence_zero_seconds_vs_minute_quote_ok():
+    """Value with :00 seconds must match a minute-precision quote (18:00)."""
+    from bookingguard.evidence.verify import check_value_in_evidence
+    fact = CandidateFact(
+        field_name="cy_cutoff",
+        value="2026-10-14T18:00:00+09:00",
+        evidence=EvidenceRef(block_id="b1", quote="CY Cutoff: 2026-10-14 18:00 +09:00"),
+        source_document_id="doc",
+    )
+    result = check_value_in_evidence(fact)
+    assert result is None  # should pass — zero seconds matches minute precision
+
+
 def test_value_evidence_seconds_mismatch():
     """Extracted value with wrong seconds vs evidence quote must be caught."""
     from bookingguard.evidence.verify import check_value_in_evidence
