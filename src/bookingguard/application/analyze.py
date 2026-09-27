@@ -143,11 +143,11 @@ def analyze_booking_change(
         orig_cutoffs = _get_all_values(original_candidates, "cy_cutoff")
         amend_cutoffs = _get_all_values(amendment_candidates, "cy_cutoff")
         if orig_cutoffs and amend_cutoffs and set(orig_cutoffs) != set(amend_cutoffs):
-            errors.append(
+            return _fail(
                 f"Same revision ({original_rev}) but different CY cutoff values: "
-                f"original={orig_cutoffs}, amendment={amend_cutoffs}."
+                f"original={orig_cutoffs}, amendment={amend_cutoffs}. "
+                f"Cannot determine authoritative cutoff.",
             )
-            processing_status = ProcessingStatus.PARTIAL
 
     identity = ShipmentIdentity(booking_reference=ref, carrier_namespace=carrier_ns)
 

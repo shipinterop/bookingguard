@@ -15,6 +15,7 @@ from bookingguard.domain.models import (
     Document,
     DocumentBlock,
     EventSemantics,
+    EvidenceRef,
     ProcessingStatus,
     Scope,
     ShipmentIdentity,
@@ -225,6 +226,35 @@ def test_evidence_failure_blocks_verdict():
     )
 
 
+def test_value_evidence_year_mismatch():
+    """Extracted value with wrong year vs evidence quote must be caught."""
+    from bookingguard.evidence.verify import check_value_in_evidence
+    fact = CandidateFact(
+        field_name="cy_cutoff",
+        value="2026-10-14T18:00:00+09:00",
+        evidence=EvidenceRef(block_id="b1", quote="CY Cutoff: 2025-10-14T18:00:00+09:00"),
+        source_document_id="doc",
+    )
+    result = check_value_in_evidence(fact)
+    assert result is not None  # mismatch detected
+    assert "2026-10-14" in result
+
+
+def test_value_evidence_timezone_mismatch():
+    """Extracted value with wrong timezone vs evidence quote must be caught."""
+    from bookingguard.evidence.verify import check_value_in_evidence
+    from bookingguard.domain.models import EvidenceRef as ER
+    fact = CandidateFact(
+        field_name="cy_cutoff",
+        value="2026-10-14T18:00:00+09:00",
+        evidence=ER(block_id="b1", quote="CY Cutoff: 2026-10-14T18:00:00+00:00"),
+        source_document_id="doc",
+    )
+    result = check_value_in_evidence(fact)
+    assert result is not None
+    assert "timezone" in result.lower() or "Timezone" in result
+
+
 # ─── 4. CSV parsing safety ───
 
 
@@ -301,12 +331,13 @@ def test_same_revision_conflict_preserved():
     assert result.verdict == Verdict.CONFLICT
 
 
-def test_same_revision_different_cutoff_flagged():
-    """Same revision but different cutoff → partial processing."""
+def test_same_revision_different_cutoff_needs_review():
+    """Same revision but different cutoff → needs_review (not just partial)."""
     original = "Booking Reference: DEMO-001\nRevision: 2\nCY Cutoff: 2026-10-14T18:00:00+09:00\n"
     amendment = "Booking Reference: DEMO-001\nRevision: 2\nCY Cutoff: 2026-10-15T18:00:00+09:00\n"
     result = analyze_booking_change(original, amendment, PLAN_DEMO_001)
-    assert result.processing_status == ProcessingStatus.PARTIAL
+    assert result.verdict == Verdict.NEEDS_REVIEW
+    assert any("same revision" in e.lower() for e in result.errors)
     assert any("same revision" in e.lower() for e in result.errors)
 
 

@@ -121,28 +121,33 @@ def check_value_in_evidence(fact: CandidateFact) -> str | None:
     quote = fact.evidence.quote
     value = fact.value
 
-    # For datetime fields, check that the core date/time appears in the quote
+    # For datetime fields, check the full YYYY-MM-DD and HH:MM appear in the quote
     if fact.field_name == "cy_cutoff":
-        # Extract date portions from value and check quote contains them
-        # e.g. value "2026-10-14T18:00:00+09:00" → check for "10-14" and "18:00"
-        date_match = re.search(r"(\d{4})-(\d{2})-(\d{2})", value)
-        time_match = re.search(r"(\d{2}):(\d{2})", value)
+        date_match = re.search(r"(\d{4}-\d{2}-\d{2})", value)
+        time_match = re.search(r"(\d{2}:\d{2})", value)
+
         if date_match:
-            date_part = f"{date_match.group(2)}-{date_match.group(3)}"
-            # Check various date formats in quote
-            if (
-                date_part not in quote
-                and date_match.group(0) not in quote
-                and f"{date_match.group(2)}/{date_match.group(3)}" not in quote
-                and f"{int(date_match.group(3))}" not in quote
-            ):
-                return (
-                    f"Date from value ({date_match.group(0)}) not found in quote."
-                )
+            full_date = date_match.group(1)  # e.g. "2026-10-14"
+            # Check full YYYY-MM-DD (not just MM-DD, to catch wrong year)
+            if full_date not in quote:
+                return f"Full date from value ({full_date}) not found in quote."
+
         if time_match:
-            time_str = f"{time_match.group(1)}:{time_match.group(2)}"
+            time_str = time_match.group(1)  # e.g. "18:00"
             if time_str not in quote:
                 return f"Time from value ({time_str}) not found in quote."
+
+        # Also check timezone consistency if both have timezone info
+        value_tz = re.search(r"([+-]\d{2}:\d{2}|Z)$", value)
+        quote_tz = re.search(r"([+-]\d{2}:\d{2}|Z)", quote)
+        if value_tz and quote_tz:
+            v_tz = value_tz.group(1)
+            q_tz = quote_tz.group(1)
+            if v_tz != q_tz:
+                return (
+                    f"Timezone mismatch: value has '{v_tz}' "
+                    f"but quote has '{q_tz}'."
+                )
 
     elif fact.field_name in ("booking_reference", "carrier"):
         if value not in quote:
