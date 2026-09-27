@@ -54,6 +54,11 @@ def parse_plan_csv(csv_text: str) -> list[GateInPlan]:
     if len(reader.fieldnames) != len(set(reader.fieldnames)):
         raise PlanCSVError("Duplicate column headers detected.")
 
+    # Check for extra/unexpected columns
+    extra = actual - REQUIRED_COLUMNS
+    if extra:
+        raise PlanCSVError(f"Unexpected extra columns: {', '.join(sorted(extra))}")
+
     plans: list[GateInPlan] = []
     seen_plan_ids: set[str] = set()
 
@@ -82,12 +87,13 @@ def parse_plan_csv(csv_text: str) -> list[GateInPlan]:
         except ValueError:
             event_semantics = EventSemantics.UNKNOWN
 
-        # Validate plan_id uniqueness
+        # Validate plan_id — required and unique
         plan_id = _safe_strip(row.get("plan_id"), "plan_id", i)
-        if plan_id and plan_id in seen_plan_ids:
+        if not plan_id:
+            raise PlanCSVError(f"Row {i}: plan_id is required but empty.")
+        if plan_id in seen_plan_ids:
             raise PlanCSVError(f"Row {i}: duplicate plan_id '{plan_id}'.")
-        if plan_id:
-            seen_plan_ids.add(plan_id)
+        seen_plan_ids.add(plan_id)
 
         plans.append(
             GateInPlan(
