@@ -1,0 +1,41 @@
+{
+  "source_document_sha256": "ce6d150e6c98e8aa9b98692857c83d4f1c91f7e60dd1dcd33f40d1d837373435",
+  "provider": "bookingguard",
+  "model_id": "heuristic-v1",
+  "prompt_version": "1.0",
+  "candidate_facts": [
+    {
+      "field_name": "booking_reference",
+      "value": "DEMO-001",
+      "value_role": "current",
+      "action": "set",
+      "scope": {"type": "booking_all"},
+      "evidence": {"block_id": "block-2", "quote": "Booking Reference: DEMO-001"}
+    },
+    {
+      "field_name": "carrier",
+      "value": "Demo Line",
+      "value_role": "current",
+      "action": "set",
+      "scope": {"type": "booking_all"},
+      "evidence": {"block_id": "block-2", "quote": "Carrier: Demo Line"}
+    },
+    {
+      "field_name": "revision",
+      "value": "1",
+      "value_role": "current",
+      "action": "set",
+      "scope": {"type": "booking_all"},
+      "evidence": {"block_id": "block-2", "quote": "Revision: 1"}
+    },
+    {
+      "field_name": "cy_cutoff",
+      "value": "2026-10-15T18:00:00+09:00",
+      "value_role": "current",
+      "action": "set",
+      "scope": {"type": "booking_all"},
+      "evidence": {"block_id": "block-4", "quote": "CY Cutoff: 2026-10-15T18:00:00+09:00"}
+    }
+  ],
+  "unresolved_items": []
+}
