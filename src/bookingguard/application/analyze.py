@@ -47,6 +47,8 @@ def analyze_booking_change(
     """Run the full analysis pipeline."""
     errors: list[str] = []
     processing_status = ProcessingStatus.COMPLETED
+    from bookingguard.domain.models import ExecutionMode
+    exec_mode = ExecutionMode.HEURISTIC
 
     # 1. Ingest documents
     original_doc = ingest_text(original_text, "original.txt")
@@ -58,6 +60,7 @@ def analyze_booking_change(
             original_document_id=original_doc.document_id,
             amendment_document_id=amendment_doc.document_id,
             processing_status=status,
+            execution_mode=exec_mode,
             verdict=Verdict.NEEDS_REVIEW,
             errors=[reason],
         )
@@ -66,15 +69,37 @@ def analyze_booking_change(
     if not amendment_text.strip():
         return _fail("Amendment document is empty.")
 
-    # 2. Extract candidate facts using the provided extractor
-    ext = extractor or _default_extractor
+    # 2. Select extractor — honor BOOKINGGUARD_MODE env if no explicit extractor
+    import os
+    ext = extractor
+    if ext is None:
+        mode = os.environ.get("BOOKINGGUARD_MODE", "heuristic").lower()
+        if mode == "replay":
+            from bookingguard.extract.replay import ReplayExtractor
+            ext = ReplayExtractor()
+        elif mode == "live":
+            from bookingguard.extract.llm import LLMExtractor
+            ext = LLMExtractor()
+        else:
+            ext = _default_extractor
+
     original_result = ext.extract(original_doc)
     amendment_result = ext.extract(amendment_doc)
+
+    # Carry execution mode from extraction results
+    exec_mode = original_result.execution_mode  # noqa: F841 — used in _fail closure
 
     if original_result.processing_status == ProcessingStatus.FAILED:
         return _fail(f"Original extraction failed: {original_result.unresolved_items}")
     if amendment_result.processing_status == ProcessingStatus.FAILED:
         return _fail(f"Amendment extraction failed: {amendment_result.unresolved_items}")
+
+    # Propagate partial extraction status
+    if (
+        original_result.processing_status == ProcessingStatus.PARTIAL
+        or amendment_result.processing_status == ProcessingStatus.PARTIAL
+    ):
+        processing_status = ProcessingStatus.PARTIAL
 
     original_candidates = original_result.candidate_facts
     amendment_candidates = amendment_result.candidate_facts
@@ -155,8 +180,15 @@ def analyze_booking_change(
         and amendment_rev is not None
         and original_rev == amendment_rev
     ):
-        orig_cutoffs = _get_all_values(original_candidates, "cy_cutoff")
-        amend_cutoffs = _get_all_values(amendment_candidates, "cy_cutoff")
+        # Only compare CURRENT cutoffs — exclude proposed/old values
+        orig_cutoffs = [
+            f.value for f in original_candidates
+            if f.field_name == "cy_cutoff" and f.value_role == ValueRole.CURRENT
+        ]
+        amend_cutoffs = [
+            f.value for f in amendment_candidates
+            if f.field_name == "cy_cutoff" and f.value_role == ValueRole.CURRENT
+        ]
         if orig_cutoffs and amend_cutoffs and not _same_instants(orig_cutoffs, amend_cutoffs):
             return _fail(
                 f"Same revision ({original_rev}) but different CY cutoff values: "
@@ -176,7 +208,7 @@ def analyze_booking_change(
     original_verified: list[VerifiedFact] = []
     amendment_verified: list[VerifiedFact] = []
     has_critical_failure = False
-    critical_fields = {"cy_cutoff"}
+    critical_fields = {"cy_cutoff", "booking_reference"}
 
     for candidates, verified_list, doc_label in [
         (original_candidates, original_verified, "original"),
@@ -225,6 +257,7 @@ def analyze_booking_change(
             original_document_id=original_doc.document_id,
             amendment_document_id=amendment_doc.document_id,
             processing_status=ProcessingStatus.PARTIAL,
+            execution_mode=exec_mode,
             verdict=Verdict.NEEDS_REVIEW,
             evidence=all_verified_evidence,
             errors=errors + ["Critical fact verification failed. Cannot evaluate rules."],
@@ -257,6 +290,7 @@ def analyze_booking_change(
                 original_document_id=original_doc.document_id,
                 amendment_document_id=amendment_doc.document_id,
                 processing_status=ProcessingStatus.PARTIAL,
+                execution_mode=exec_mode,
                 verdict=Verdict.NEEDS_REVIEW,
                 evidence=all_verified_evidence,
                 errors=errors + [
@@ -271,6 +305,7 @@ def analyze_booking_change(
             original_document_id=original_doc.document_id,
             amendment_document_id=amendment_doc.document_id,
             processing_status=ProcessingStatus.PARTIAL,
+            execution_mode=exec_mode,
             verdict=Verdict.NEEDS_REVIEW,
             evidence=all_verified_evidence,
             errors=errors + [f"No plan found for booking {ref}."],
@@ -351,6 +386,7 @@ def analyze_booking_change(
         original_document_id=original_doc.document_id,
         amendment_document_id=amendment_doc.document_id,
         processing_status=processing_status,
+        execution_mode=exec_mode,
         before=before,
         after=after,
         findings=findings,

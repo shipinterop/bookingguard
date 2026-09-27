@@ -164,9 +164,20 @@ class LLMExtractor:
                 "total_tokens": response.usage.total_tokens,
             }
 
-        # Convert to CandidateFacts
-        facts = _parse_extraction_response(data, document.document_id)
-        unresolved = data.get("unresolved_items", [])
+        # Convert to CandidateFacts — catch schema-invalid payloads
+        try:
+            facts = _parse_extraction_response(data, document.document_id)
+        except (TypeError, AttributeError, KeyError) as e:
+            return ExtractionResult(
+                processing_status=ProcessingStatus.FAILED,
+                execution_mode=ExecutionMode.LIVE,
+                provider="openai",
+                model_id=response.model or self.model,
+                latency_ms=latency,
+                usage=usage,
+                unresolved_items=[f"Schema-invalid JSON response: {e}"],
+            )
+        unresolved = data.get("unresolved_items") or []
 
         return ExtractionResult(
             candidate_facts=facts,
@@ -186,25 +197,9 @@ def _parse_extraction_response(
     """Convert LLM JSON response to CandidateFact list."""
     facts: list[CandidateFact] = []
 
-    # Extract identity facts
-    for field, key in [
-        ("booking_reference", "booking_reference"),
-        ("carrier", "carrier"),
-        ("revision", "revision"),
-    ]:
-        val = data.get(key)
-        if val:
-            facts.append(
-                CandidateFact(
-                    field_name=field,
-                    value=str(val),
-                    value_role=ValueRole.CURRENT,
-                    action=Action.SET,
-                    scope=Scope(type="booking_all"),
-                    source_document_id=document_id,
-                    extraction_method="llm",
-                )
-            )
+    # Identity facts (booking_reference, carrier, revision) are only accepted
+    # when they come from the changes array with proper evidence.
+    # Top-level fields without evidence are NOT safe for critical fields.
 
     # Extract changes
     for change in data.get("changes", []):

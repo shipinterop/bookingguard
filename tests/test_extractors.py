@@ -46,7 +46,7 @@ def test_llm_no_api_key():
 
 
 def test_llm_parse_response():
-    """Test LLM response parsing."""
+    """Test LLM response parsing — only changes array produces facts."""
     data = {
         "booking_reference": "DEMO-001",
         "carrier": "Demo Line",
@@ -66,13 +66,13 @@ def test_llm_parse_response():
         ],
     }
     facts = _parse_extraction_response(data, "doc-1")
-    assert len(facts) == 4  # booking_ref + carrier + revision + cy_cutoff
-    cutoff_facts = [f for f in facts if f.field_name == "cy_cutoff"]
-    assert len(cutoff_facts) == 1
-    assert cutoff_facts[0].value == "2026-10-14T18:00:00+09:00"
-    assert cutoff_facts[0].value_role == ValueRole.CURRENT
-    assert cutoff_facts[0].evidence is not None
-    assert cutoff_facts[0].extraction_method == "llm"
+    # Only changes array produces facts (identity without evidence is unsafe)
+    assert len(facts) == 1
+    assert facts[0].field_name == "cy_cutoff"
+    assert facts[0].value == "2026-10-14T18:00:00+09:00"
+    assert facts[0].value_role == ValueRole.CURRENT
+    assert facts[0].evidence is not None
+    assert facts[0].extraction_method == "llm"
 
 
 def test_llm_parse_proposed_value():

@@ -59,9 +59,17 @@ class ReplayExtractor:
                 unresolved_items=[f"Failed to read replay file: {e}"],
             )
 
-        # Validate document hash matches
+        # Validate document hash — required in every replay file
         stored_hash = data.get("source_document_sha256", "")
-        if stored_hash and stored_hash != doc_hash:
+        if not stored_hash:
+            return ExtractionResult(
+                processing_status=ProcessingStatus.FAILED,
+                execution_mode=ExecutionMode.REPLAY,
+                unresolved_items=[
+                    "Replay file missing source_document_sha256. Cannot verify content."
+                ],
+            )
+        if stored_hash != doc_hash:
             return ExtractionResult(
                 processing_status=ProcessingStatus.FAILED,
                 execution_mode=ExecutionMode.REPLAY,
