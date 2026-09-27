@@ -14,12 +14,9 @@ from datetime import datetime
 from bookingguard.domain.models import (
     Action,
     CandidateFact,
-    Document,
-    EvidenceRef,
     ProcessingStatus,
     RuleFinding,
     RunResult,
-    Scope,
     ShipmentIdentity,
     ValueRole,
     VerifiedEvidence,
@@ -30,10 +27,14 @@ from bookingguard.evidence.verify import (
     promote_to_verified,
     verify_candidate,
 )
+from bookingguard.extract.base import ExtractionResult, Extractor
+from bookingguard.extract.heuristic import HeuristicExtractor
 from bookingguard.ingest.plan_csv import PlanCSVError, parse_plan_csv
 from bookingguard.ingest.text import ingest_text
 from bookingguard.rules.cy_cutoff import evaluate_cy_cutoff
 from bookingguard.state.reconstruct import reconstruct_state
+
+_default_extractor = HeuristicExtractor()
 
 
 def analyze_booking_change(
@@ -41,6 +42,7 @@ def analyze_booking_change(
     amendment_text: str,
     plan_csv: str,
     booking_reference: str | None = None,
+    extractor: Extractor | None = None,
 ) -> RunResult:
     """Run the full analysis pipeline."""
     errors: list[str] = []
@@ -64,9 +66,20 @@ def analyze_booking_change(
     if not amendment_text.strip():
         return _fail("Amendment document is empty.")
 
-    # 2. Extract candidate facts (deterministic heuristic for MVP)
-    original_candidates = _extract_candidates_heuristic(original_doc)
-    amendment_candidates = _extract_candidates_heuristic(amendment_doc)
+    # 2. Extract candidate facts using the provided extractor
+    ext = extractor or _default_extractor
+    original_result = ext.extract(original_doc)
+    amendment_result = ext.extract(amendment_doc)
+
+    if original_result.processing_status == ProcessingStatus.FAILED:
+        return _fail(f"Original extraction failed: {original_result.unresolved_items}")
+    if amendment_result.processing_status == ProcessingStatus.FAILED:
+        return _fail(f"Amendment extraction failed: {amendment_result.unresolved_items}")
+
+    original_candidates = original_result.candidate_facts
+    amendment_candidates = amendment_result.candidate_facts
+    errors.extend(original_result.unresolved_items)
+    errors.extend(amendment_result.unresolved_items)
 
     # 3. Determine booking reference — reject ambiguity within each document
     original_refs = _get_all_values(original_candidates, "booking_reference")
@@ -410,49 +423,3 @@ def _validate_candidate_semantics(candidate: CandidateFact) -> list[str]:
     return errors
 
 
-def _extract_candidates_heuristic(doc: Document) -> list[CandidateFact]:
-    """Simple line-based extraction for structured fixtures.
-
-    For the heuristic extractor, structured Key: Value lines get CURRENT/SET/booking_all
-    because the format is unambiguous. LLM extractors should use UNKNOWN defaults.
-    """
-    facts: list[CandidateFact] = []
-    field_map = {
-        "booking reference": "booking_reference",
-        "booking ref": "booking_reference",
-        "cy cutoff": "cy_cutoff",
-        "cy cut-off": "cy_cutoff",
-        "revision": "revision",
-        "carrier": "carrier",
-    }
-
-    for block in doc.blocks:
-        for line in block.text.splitlines():
-            line_stripped = line.strip()
-            if ":" not in line_stripped:
-                continue
-            key, _, val = line_stripped.partition(":")
-            key_lower = key.strip().lower()
-            val = val.strip()
-            if not val:
-                continue
-
-            field_name = field_map.get(key_lower)
-            if field_name is not None:
-                facts.append(
-                    CandidateFact(
-                        field_name=field_name,
-                        value=val,
-                        value_role=ValueRole.CURRENT,
-                        action=Action.SET,
-                        scope=Scope(type="booking_all"),
-                        source_document_id=doc.document_id,
-                        extraction_method="heuristic",
-                        evidence=EvidenceRef(
-                            block_id=block.block_id,
-                            quote=line_stripped,
-                        ),
-                    )
-                )
-
-    return facts
