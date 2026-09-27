@@ -255,6 +255,47 @@ def test_value_evidence_timezone_mismatch():
     assert "timezone" in result.lower() or "Timezone" in result
 
 
+def test_value_evidence_zero_seconds_vs_minute_quote_ok():
+    """Value with :00 seconds must match a minute-precision quote (18:00)."""
+    from bookingguard.evidence.verify import check_value_in_evidence
+    fact = CandidateFact(
+        field_name="cy_cutoff",
+        value="2026-10-14T18:00:00+09:00",
+        evidence=EvidenceRef(block_id="b1", quote="CY Cutoff: 2026-10-14 18:00 +09:00"),
+        source_document_id="doc",
+    )
+    result = check_value_in_evidence(fact)
+    assert result is None  # should pass — zero seconds matches minute precision
+
+
+def test_value_evidence_seconds_mismatch():
+    """Extracted value with wrong seconds vs evidence quote must be caught."""
+    from bookingguard.evidence.verify import check_value_in_evidence
+    fact = CandidateFact(
+        field_name="cy_cutoff",
+        value="2026-10-14T18:00:59+09:00",
+        evidence=EvidenceRef(block_id="b1", quote="CY Cutoff: 2026-10-14T18:00:00+09:00"),
+        source_document_id="doc",
+    )
+    result = check_value_in_evidence(fact)
+    assert result is not None  # seconds mismatch detected
+
+
+def test_same_revision_z_vs_offset_not_rejected():
+    """Same cutoff expressed as Z and +00:00 should NOT be treated as conflict."""
+    original = "Booking Reference: DEMO-001\nRevision: 2\nCY Cutoff: 2026-10-15T09:00:00+00:00\n"
+    amendment = "Booking Reference: DEMO-001\nRevision: 2\nCY Cutoff: 2026-10-15T09:00:00Z\n"
+    plan = """\
+plan_id,booking_reference,carrier_namespace,leg_id,terminal_id,container_reference,planned_gate_in_at,event_semantics
+PLAN-001,DEMO-001,demo_line,LEG-1,KRPUS-T1,DEMO1234567,2026-10-15T08:00:00+00:00,gate_in_completed
+"""
+    result = analyze_booking_change(original, amendment, plan)
+    # Should NOT fail due to same-revision conflict — they're the same instant
+    assert result.verdict != Verdict.NEEDS_REVIEW or not any(
+        "same revision" in e.lower() for e in result.errors
+    )
+
+
 # ─── 4. CSV parsing safety ───
 
 

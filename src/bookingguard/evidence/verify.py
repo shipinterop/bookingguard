@@ -121,23 +121,38 @@ def check_value_in_evidence(fact: CandidateFact) -> str | None:
     quote = fact.evidence.quote
     value = fact.value
 
-    # For datetime fields, check the full YYYY-MM-DD and HH:MM appear in the quote
+    # For datetime fields, check the full YYYY-MM-DD and HH:MM:SS in the quote
     if fact.field_name == "cy_cutoff":
         date_match = re.search(r"(\d{4}-\d{2}-\d{2})", value)
-        time_match = re.search(r"(\d{2}:\d{2})", value)
+        # Match full time including seconds: HH:MM:SS or HH:MM
+        time_match = re.search(r"(\d{2}:\d{2}(?::\d{2})?)", value)
 
         if date_match:
-            full_date = date_match.group(1)  # e.g. "2026-10-14"
-            # Check full YYYY-MM-DD (not just MM-DD, to catch wrong year)
+            full_date = date_match.group(1)
             if full_date not in quote:
                 return f"Full date from value ({full_date}) not found in quote."
 
         if time_match:
-            time_str = time_match.group(1)  # e.g. "18:00"
+            time_str = time_match.group(1)  # e.g. "18:00:59" or "18:00"
             if time_str not in quote:
-                return f"Time from value ({time_str}) not found in quote."
+                # If value has seconds, try without seconds
+                if time_str.count(":") == 2:
+                    short_time = time_str[:5]  # "18:00"
+                    seconds = time_str[6:]     # "59" or "00"
+                    if short_time not in quote:
+                        return f"Time from value ({time_str}) not found in quote."
+                    # Quote has only HH:MM — accept if seconds are "00"
+                    # (normalized zero seconds matches minute-precision quote)
+                    if seconds != "00":
+                        return (
+                            f"Time with seconds ({time_str}) does not match quote. "
+                            f"Only {short_time} found."
+                        )
+                    # seconds == "00" and short_time matches → OK
+                else:
+                    return f"Time from value ({time_str}) not found in quote."
 
-        # Also check timezone consistency if both have timezone info
+        # Check timezone consistency
         value_tz = re.search(r"([+-]\d{2}:\d{2}|Z)$", value)
         quote_tz = re.search(r"([+-]\d{2}:\d{2}|Z)", quote)
         if value_tz and quote_tz:

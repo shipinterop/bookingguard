@@ -9,6 +9,8 @@ No unverified CandidateFact may reach state reconstruction or rule evaluation.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from bookingguard.domain.models import (
     Action,
     CandidateFact,
@@ -142,7 +144,7 @@ def analyze_booking_change(
     ):
         orig_cutoffs = _get_all_values(original_candidates, "cy_cutoff")
         amend_cutoffs = _get_all_values(amendment_candidates, "cy_cutoff")
-        if orig_cutoffs and amend_cutoffs and set(orig_cutoffs) != set(amend_cutoffs):
+        if orig_cutoffs and amend_cutoffs and not _same_instants(orig_cutoffs, amend_cutoffs):
             return _fail(
                 f"Same revision ({original_rev}) but different CY cutoff values: "
                 f"original={orig_cutoffs}, amendment={amend_cutoffs}. "
@@ -343,6 +345,33 @@ def analyze_booking_change(
         evidence=all_verified_evidence,
         errors=errors,
     )
+
+
+def _parse_iso(s: str) -> datetime | None:
+    """Parse ISO datetime, handling Z suffix. Returns None on failure."""
+    try:
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        return datetime.fromisoformat(s)
+    except (ValueError, TypeError):
+        return None
+
+
+def _same_instants(a_values: list[str], b_values: list[str]) -> bool:
+    """Check if two lists of datetime strings represent the same set of instants."""
+    a_parsed = set()
+    b_parsed = set()
+    for v in a_values:
+        dt = _parse_iso(v)
+        if dt is None:
+            return False  # can't parse → can't confirm same
+        a_parsed.add(dt)
+    for v in b_values:
+        dt = _parse_iso(v)
+        if dt is None:
+            return False
+        b_parsed.add(dt)
+    return a_parsed == b_parsed
 
 
 def _get_value(facts: list[CandidateFact], field_name: str) -> str | None:
