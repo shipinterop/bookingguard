@@ -76,7 +76,8 @@ def analyze_booking_change(
         mode = os.environ.get("BOOKINGGUARD_MODE", "heuristic").lower()
         if mode == "replay":
             from bookingguard.extract.replay import ReplayExtractor
-            ext = ReplayExtractor()
+            replay_dir = os.environ.get("BOOKINGGUARD_REPLAY_DIR", "fixtures/replay")
+            ext = ReplayExtractor(replay_dir=replay_dir)
         elif mode == "live":
             from bookingguard.extract.llm import LLMExtractor
             ext = LLMExtractor()
