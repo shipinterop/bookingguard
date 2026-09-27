@@ -32,6 +32,12 @@ class Verdict(str, Enum):
     NEEDS_REVIEW = "needs_review"
 
 
+class ProcessingStatus(str, Enum):
+    COMPLETED = "completed"
+    PARTIAL = "partial"
+    FAILED = "failed"
+
+
 class EventSemantics(str, Enum):
     GATE_IN_COMPLETED = "gate_in_completed"
     GATE_ARRIVAL = "gate_arrival"
@@ -143,6 +149,7 @@ class RunResult(BaseModel):
     booking_reference: str = ""
     original_document_id: str = ""
     amendment_document_id: str = ""
+    processing_status: ProcessingStatus = ProcessingStatus.COMPLETED
     before: dict[str, Any] = Field(default_factory=dict)
     after: dict[str, Any] = Field(default_factory=dict)
     findings: list[RuleFinding] = Field(default_factory=list)

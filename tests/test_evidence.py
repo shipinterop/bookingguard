@@ -57,5 +57,6 @@ def test_evidence_duplicate():
         ],
     )
     result = verify_evidence(doc, "cutoff", "block-1")
-    assert result.verified is True
+    assert result.verified is False  # ambiguous: appears 2 times
     assert result.duplicate_count == 2
+    assert "ambiguous" in result.reason.lower()

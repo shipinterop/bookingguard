@@ -1,4 +1,13 @@
-"""End-to-end analysis pipeline."""
+"""End-to-end analysis pipeline.
+
+Safety rules enforced:
+1. Carrier mismatch → needs_review (no silent fallback)
+2. --booking-ref cannot override an explicit document reference
+3. Only CURRENT+SET facts applied to state
+4. Evidence verification gates rule evaluation for critical facts
+5. Extraction failure ≠ "no change"
+6. Processing status separate from business verdict
+"""
 
 from __future__ import annotations
 
@@ -7,6 +16,7 @@ from bookingguard.domain.models import (
     Document,
     EvidenceRef,
     ExtractedFact,
+    ProcessingStatus,
     RuleFinding,
     RunResult,
     ShipmentIdentity,
@@ -27,52 +37,54 @@ def analyze_booking_change(
     plan_csv: str,
     booking_reference: str | None = None,
 ) -> RunResult:
-    """Run the full analysis pipeline.
-
-    For the deterministic MVP, this uses simple heuristic extraction
-    rather than LLM. The text fixtures contain structured key-value lines.
-    """
+    """Run the full analysis pipeline."""
     errors: list[str] = []
+    processing_status = ProcessingStatus.COMPLETED
 
     # 1. Ingest documents
     original_doc = ingest_text(original_text, "original.txt")
     amendment_doc = ingest_text(amendment_text, "amendment.txt")
 
+    def _fail(reason: str, status: ProcessingStatus = ProcessingStatus.FAILED) -> RunResult:
+        return RunResult(
+            booking_reference=booking_reference or "UNKNOWN",
+            original_document_id=original_doc.document_id,
+            amendment_document_id=amendment_doc.document_id,
+            processing_status=status,
+            verdict=Verdict.NEEDS_REVIEW,
+            errors=[reason],
+        )
+
     # 2. Extract facts (deterministic heuristic for MVP)
     original_facts = _extract_facts_heuristic(original_doc)
     amendment_facts = _extract_facts_heuristic(amendment_doc)
 
-    # Determine booking reference
-    ref = booking_reference
-    original_ref = None
-    amendment_ref = None
-    for f in original_facts:
-        if f.field_name == "booking_reference":
-            original_ref = f.value
-    for f in amendment_facts:
-        if f.field_name == "booking_reference":
-            amendment_ref = f.value
+    # 3. Determine booking reference
+    original_ref = _get_fact_value(original_facts, "booking_reference")
+    amendment_ref = _get_fact_value(amendment_facts, "booking_reference")
 
-    if ref is None:
-        ref = original_ref or amendment_ref or "UNKNOWN"
-
-    # P1: Reject amendments for a different booking
+    # Reject amendments for a different booking
     if (
         original_ref is not None
         and amendment_ref is not None
         and original_ref != amendment_ref
     ):
-        return RunResult(
-            booking_reference=ref,
-            original_document_id=original_doc.document_id,
-            amendment_document_id=amendment_doc.document_id,
-            verdict=Verdict.NEEDS_REVIEW,
-            errors=[
-                f"Booking reference mismatch: original={original_ref}, amendment={amendment_ref}."
-            ],
+        return _fail(
+            f"Booking reference mismatch: original={original_ref}, amendment={amendment_ref}."
         )
 
-    # Extract carrier namespace
+    doc_ref = original_ref or amendment_ref
+
+    # --booking-ref cannot override an explicit document reference
+    if booking_reference is not None and doc_ref is not None and booking_reference != doc_ref:
+        return _fail(
+            f"--booking-ref '{booking_reference}' conflicts with document "
+            f"reference '{doc_ref}'. Use the document's own reference."
+        )
+
+    ref = booking_reference or doc_ref or "UNKNOWN"
+
+    # 4. Extract carrier namespace
     carrier_ns = ""
     for f in original_facts + amendment_facts:
         if f.field_name == "carrier":
@@ -81,24 +93,58 @@ def analyze_booking_change(
 
     identity = ShipmentIdentity(booking_reference=ref, carrier_namespace=carrier_ns)
 
-    # 3. Reconstruct state
-    state, warnings = reconstruct_state(identity, original_facts, amendment_facts)
-    for w in warnings:
-        errors.append(w.reason)
+    # 5. Verify evidence BEFORE state reconstruction
+    all_facts = original_facts + amendment_facts
+    docs_by_id = {
+        original_doc.document_id: original_doc,
+        amendment_doc.document_id: amendment_doc,
+    }
+    verified: list[VerifiedEvidence] = []
+    evidence_failures: list[str] = []
+    critical_fields = {"cy_cutoff"}
 
-    # 4. Parse plan CSV
-    try:
-        plans = parse_plan_csv(plan_csv)
-    except PlanCSVError as e:
+    for fact in all_facts:
+        if fact.evidence is None:
+            continue
+        doc = docs_by_id.get(fact.source_document_id)
+        if doc is None:
+            continue
+        ve = verify_evidence(doc, fact.evidence.quote, fact.evidence.block_id)
+        verified.append(ve)
+        if not ve.verified:
+            msg = f"Evidence failed for '{fact.field_name}': {ve.reason}"
+            errors.append(msg)
+            if fact.field_name in critical_fields:
+                evidence_failures.append(msg)
+
+    # If critical evidence failed, block rule evaluation
+    if evidence_failures:
         return RunResult(
             booking_reference=ref,
             original_document_id=original_doc.document_id,
             amendment_document_id=amendment_doc.document_id,
+            processing_status=ProcessingStatus.PARTIAL,
             verdict=Verdict.NEEDS_REVIEW,
-            errors=[f"Plan CSV error: {e}"],
+            evidence=verified,
+            errors=errors + ["Critical evidence verification failed. Cannot evaluate rules."],
         )
 
-    # 5. Match plan to booking (by reference + carrier when available)
+    # 6. Reconstruct state
+    state, warnings = reconstruct_state(identity, original_facts, amendment_facts)
+    blocking_warnings = [w for w in warnings if w.blocking]
+    for w in warnings:
+        errors.append(w.reason)
+
+    if blocking_warnings:
+        processing_status = ProcessingStatus.PARTIAL
+
+    # 7. Parse plan CSV
+    try:
+        plans = parse_plan_csv(plan_csv)
+    except PlanCSVError as e:
+        return _fail(f"Plan CSV error: {e}")
+
+    # 8. Match plan to booking — NO silent fallback on carrier mismatch
     matched_plans = [p for p in plans if p.booking_reference == ref]
     if carrier_ns and matched_plans:
         carrier_filtered = [
@@ -107,33 +153,59 @@ def analyze_booking_change(
         if carrier_filtered:
             matched_plans = carrier_filtered
         else:
-            errors.append(
-                f"Carrier namespace '{carrier_ns}' not found in plans; "
-                f"matching by booking reference only."
+            # Carrier mismatch → needs_review, NOT fallback
+            return RunResult(
+                booking_reference=ref,
+                original_document_id=original_doc.document_id,
+                amendment_document_id=amendment_doc.document_id,
+                processing_status=ProcessingStatus.PARTIAL,
+                verdict=Verdict.NEEDS_REVIEW,
+                evidence=verified,
+                errors=errors + [
+                    f"Carrier namespace '{carrier_ns}' not found in plans for "
+                    f"booking {ref}. Cannot safely match plans."
+                ],
             )
+
     if not matched_plans:
         return RunResult(
             booking_reference=ref,
             original_document_id=original_doc.document_id,
             amendment_document_id=amendment_doc.document_id,
+            processing_status=ProcessingStatus.PARTIAL,
             verdict=Verdict.NEEDS_REVIEW,
-            errors=[f"No plan found for booking {ref}."],
+            evidence=verified,
+            errors=errors + [f"No plan found for booking {ref}."],
         )
 
-    # 6. Build before/after
+    # 9. Build before/after from verified state
     before: dict[str, str] = {}
     after: dict[str, str] = {}
     for f in original_facts:
-        if f.field_name == "cy_cutoff":
+        if f.field_name == "cy_cutoff" and f.value_role == ValueRole.CURRENT:
             before["cy_cutoff"] = f.value
     for f in amendment_facts:
-        if f.field_name == "cy_cutoff":
+        if f.field_name == "cy_cutoff" and f.value_role == ValueRole.CURRENT:
             after["cy_cutoff"] = f.value
-    # If amendment didn't change cutoff, carry forward
+
+    # 10. Check extraction completeness
+    # If amendment had content but no cutoff was extracted, flag it
+    amendment_has_content = len(amendment_doc.blocks) > 0
+    amendment_has_cutoff = any(
+        f.field_name == "cy_cutoff" for f in amendment_facts
+    )
+    if amendment_has_content and not amendment_has_cutoff and "cy_cutoff" in before:
+        errors.append(
+            "Amendment document has content but no CY cutoff was extracted. "
+            "This may indicate extraction failure rather than no change."
+        )
+        processing_status = ProcessingStatus.PARTIAL
+
+    # If no cutoff extracted at all, carry forward original
     if "cy_cutoff" not in after and "cy_cutoff" in before:
         after["cy_cutoff"] = before["cy_cutoff"]
 
-    # 7. Evaluate rules
+    # 11. Evaluate rules
     findings: list[RuleFinding] = []
     cutoff = state.cy_cutoff
 
@@ -155,30 +227,10 @@ def analyze_booking_change(
             )
             findings.append(finding)
 
-    # 8. Verify evidence from extracted facts
-    all_facts = original_facts + amendment_facts
-    docs_by_id = {
-        original_doc.document_id: original_doc,
-        amendment_doc.document_id: amendment_doc,
-    }
-    verified: list[VerifiedEvidence] = []
-    for fact in all_facts:
-        if fact.evidence is None:
-            continue
-        doc = docs_by_id.get(fact.source_document_id)
-        if doc is None:
-            continue
-        ve = verify_evidence(doc, fact.evidence.quote, fact.evidence.block_id)
-        verified.append(ve)
-        if not ve.verified:
-            errors.append(
-                f"Evidence verification failed for {fact.field_name}: {ve.reason}"
-            )
-
-    # 9. Overall verdict
+    # 12. Overall verdict — blocking warnings force needs_review
     if any(f.verdict == Verdict.CONFLICT for f in findings):
         verdict = Verdict.CONFLICT
-    elif any(f.verdict == Verdict.NEEDS_REVIEW for f in findings):
+    elif any(f.verdict == Verdict.NEEDS_REVIEW for f in findings) or blocking_warnings:
         verdict = Verdict.NEEDS_REVIEW
     else:
         verdict = Verdict.NO_CONFLICT_DETECTED
@@ -187,6 +239,7 @@ def analyze_booking_change(
         booking_reference=ref,
         original_document_id=original_doc.document_id,
         amendment_document_id=amendment_doc.document_id,
+        processing_status=processing_status,
         before=before,
         after=after,
         findings=findings,
@@ -194,6 +247,13 @@ def analyze_booking_change(
         evidence=verified,
         errors=errors,
     )
+
+
+def _get_fact_value(facts: list[ExtractedFact], field_name: str) -> str | None:
+    for f in facts:
+        if f.field_name == field_name:
+            return f.value
+    return None
 
 
 def _extract_facts_heuristic(doc: Document) -> list[ExtractedFact]:
