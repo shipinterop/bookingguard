@@ -59,9 +59,21 @@ def analyze_booking_change(
     original_facts = _extract_facts_heuristic(original_doc)
     amendment_facts = _extract_facts_heuristic(amendment_doc)
 
-    # 3. Determine booking reference
-    original_ref = _get_fact_value(original_facts, "booking_reference")
-    amendment_ref = _get_fact_value(amendment_facts, "booking_reference")
+    # 3. Determine booking reference — reject ambiguity within each document
+    original_refs = _get_all_fact_values(original_facts, "booking_reference")
+    amendment_refs = _get_all_fact_values(amendment_facts, "booking_reference")
+
+    if len(set(original_refs)) > 1:
+        return _fail(
+            f"Original document contains conflicting booking references: {original_refs}."
+        )
+    if len(set(amendment_refs)) > 1:
+        return _fail(
+            f"Amendment document contains conflicting booking references: {amendment_refs}."
+        )
+
+    original_ref = original_refs[0] if original_refs else None
+    amendment_ref = amendment_refs[0] if amendment_refs else None
 
     # Reject amendments for a different booking
     if (
@@ -84,12 +96,38 @@ def analyze_booking_change(
 
     ref = booking_reference or doc_ref or "UNKNOWN"
 
-    # 4. Extract carrier namespace
-    carrier_ns = ""
-    for f in original_facts + amendment_facts:
-        if f.field_name == "carrier":
-            carrier_ns = f.value.strip().lower().replace(" ", "_")
-            break
+    # 4. Extract carrier namespace — check both documents agree
+    original_carrier = _get_fact_value(original_facts, "carrier")
+    amendment_carrier = _get_fact_value(amendment_facts, "carrier")
+
+    if (
+        original_carrier is not None
+        and amendment_carrier is not None
+        and original_carrier.strip().lower() != amendment_carrier.strip().lower()
+    ):
+        return _fail(
+            f"Carrier mismatch between documents: "
+            f"original='{original_carrier}', amendment='{amendment_carrier}'."
+        )
+
+    raw_carrier = original_carrier or amendment_carrier or ""
+    carrier_ns = raw_carrier.strip().lower().replace(" ", "_")
+
+    # 4b. Check revision order — reject reversed revisions
+    original_rev = _get_fact_value(original_facts, "revision")
+    amendment_rev = _get_fact_value(amendment_facts, "revision")
+    if original_rev is not None and amendment_rev is not None:
+        try:
+            orig_rev_num = int(original_rev)
+            amend_rev_num = int(amendment_rev)
+            if amend_rev_num < orig_rev_num:
+                return _fail(
+                    f"Amendment revision ({amendment_rev}) is older than "
+                    f"original revision ({original_rev}). "
+                    f"Documents may be in wrong order."
+                )
+        except ValueError:
+            pass  # Non-numeric revisions — can't compare, proceed
 
     identity = ShipmentIdentity(booking_reference=ref, carrier_namespace=carrier_ns)
 
@@ -188,13 +226,15 @@ def analyze_booking_change(
         if f.field_name == "cy_cutoff" and f.value_role == ValueRole.CURRENT:
             after["cy_cutoff"] = f.value
 
-    # 10. Check extraction completeness
-    # If amendment had content but no cutoff was extracted, flag it
+    # 10. Check extraction completeness — incomplete extraction → needs_review
     amendment_has_content = len(amendment_doc.blocks) > 0
     amendment_has_cutoff = any(
         f.field_name == "cy_cutoff" for f in amendment_facts
     )
-    if amendment_has_content and not amendment_has_cutoff and "cy_cutoff" in before:
+    extraction_incomplete = (
+        amendment_has_content and not amendment_has_cutoff and "cy_cutoff" in before
+    )
+    if extraction_incomplete:
         errors.append(
             "Amendment document has content but no CY cutoff was extracted. "
             "This may indicate extraction failure rather than no change."
@@ -227,10 +267,14 @@ def analyze_booking_change(
             )
             findings.append(finding)
 
-    # 12. Overall verdict — blocking warnings force needs_review
+    # 12. Overall verdict — blocking warnings or incomplete extraction force needs_review
     if any(f.verdict == Verdict.CONFLICT for f in findings):
         verdict = Verdict.CONFLICT
-    elif any(f.verdict == Verdict.NEEDS_REVIEW for f in findings) or blocking_warnings:
+    elif (
+        any(f.verdict == Verdict.NEEDS_REVIEW for f in findings)
+        or blocking_warnings
+        or extraction_incomplete
+    ):
         verdict = Verdict.NEEDS_REVIEW
     else:
         verdict = Verdict.NO_CONFLICT_DETECTED
@@ -254,6 +298,10 @@ def _get_fact_value(facts: list[ExtractedFact], field_name: str) -> str | None:
         if f.field_name == field_name:
             return f.value
     return None
+
+
+def _get_all_fact_values(facts: list[ExtractedFact], field_name: str) -> list[str]:
+    return [f.value for f in facts if f.field_name == field_name]
 
 
 def _extract_facts_heuristic(doc: Document) -> list[ExtractedFact]:

@@ -295,33 +295,56 @@ PLAN-001,,ns,L1,T1,C1,2026-10-15T10:00:00+09:00,gate_in_completed
 # ─── 5. Pipeline integration safety ───
 
 
-def test_old_revision_does_not_erase_conflict():
-    """An older revision arriving later must not erase a known conflict.
+def test_reversed_revision_rejected():
+    """Amendment with older revision than original must be rejected.
 
-    Scenario: current cutoff is 10/14, gate-in is 10/15 (conflict).
-    An old document says cutoff was 10/15. Must NOT revert to no_conflict.
+    Original is Revision 2 (cutoff 10/14, causes conflict).
+    Amendment is Revision 1 (cutoff 10/15, would erase conflict).
+    Pipeline must reject this as reversed revision order.
     """
-    # Original (Revision 2, current): cutoff moved to 10/14
     original = "Booking Reference: DEMO-001\nRevision: 2\nCY Cutoff: 2026-10-14T18:00:00+09:00\n"
-    # Amendment is actually an OLD revision 1 arriving late
-    # But our heuristic extracts it as value_role=CURRENT
-    # The pipeline must still produce conflict because it uses the document
-    # relationship (original=newer, amendment=older is wrong usage)
+    amendment = "Booking Reference: DEMO-001\nRevision: 1\nCY Cutoff: 2026-10-15T18:00:00+09:00\n"
+    result = analyze_booking_change(original, amendment, PLAN_DEMO_001)
+    assert result.verdict == Verdict.NEEDS_REVIEW
+    assert any("revision" in e.lower() for e in result.errors)
+
+
+def test_same_revision_conflict_preserved():
+    """Same revision with conflict cutoff must still show conflict."""
+    original = "Booking Reference: DEMO-001\nRevision: 2\nCY Cutoff: 2026-10-14T18:00:00+09:00\n"
     amendment = "Booking Reference: DEMO-001\nRevision: 2\nCY Cutoff: 2026-10-14T18:00:00+09:00\n"
     result = analyze_booking_change(original, amendment, PLAN_DEMO_001)
-    # With cutoff 10/14 18:00 and gate-in 10/15 10:00 → conflict
     assert result.verdict == Verdict.CONFLICT
 
 
+def test_carrier_mismatch_between_documents():
+    """Different carrier in original vs amendment → needs_review."""
+    original = "Booking Reference: DEMO-001\nCarrier: Demo Line\nCY Cutoff: 2026-10-15T18:00:00+09:00\n"
+    amendment = "Booking Reference: DEMO-001\nCarrier: Other Line\nCY Cutoff: 2026-10-15T18:00:00+09:00\n"
+    result = analyze_booking_change(original, amendment, PLAN_DEMO_001)
+    assert result.verdict == Verdict.NEEDS_REVIEW
+    assert any("carrier" in e.lower() and "mismatch" in e.lower() for e in result.errors)
+
+
+def test_duplicate_booking_refs_in_document():
+    """Document with two different booking references → needs_review."""
+    original = "Booking Reference: DEMO-001\nBooking Reference: DEMO-002\nCY Cutoff: 2026-10-15T18:00:00+09:00\n"
+    amendment = "Booking Reference: DEMO-001\nCY Cutoff: 2026-10-14T18:00:00+09:00\n"
+    result = analyze_booking_change(original, amendment, PLAN_DEMO_001)
+    assert result.verdict == Verdict.NEEDS_REVIEW
+    assert any("conflicting" in e.lower() for e in result.errors)
+
+
 def test_extraction_failure_not_no_change():
-    """If amendment has content but no cutoff extracted, flag partial processing."""
+    """If amendment has content but no cutoff extracted, must NOT return no_conflict."""
     original = "Booking Reference: DEMO-001\nCY Cutoff: 2026-10-15T18:00:00+09:00\n"
     # Amendment text that the heuristic cannot parse for cutoff
     amendment = "Booking Reference: DEMO-001\nThe CY receiving deadline has moved earlier to 2026-10-14.\n"
     result = analyze_booking_change(original, amendment, PLAN_DEMO_001)
-    # Should flag that extraction may have failed
     assert result.processing_status == ProcessingStatus.PARTIAL
     assert any("extraction" in e.lower() or "extracted" in e.lower() for e in result.errors)
+    # P1: Must be needs_review, NOT no_conflict_detected
+    assert result.verdict == Verdict.NEEDS_REVIEW
 
 
 def test_different_booking_mismatch():
