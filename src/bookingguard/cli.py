@@ -22,6 +22,7 @@ def main(argv: list[str] | None = None) -> int:
     analyze_p.add_argument("--amendment", required=True, type=Path, help="Path to amendment text.")
     analyze_p.add_argument("--plan", required=True, type=Path, help="Path to plan CSV.")
     analyze_p.add_argument("--booking-ref", default=None, help="Override booking reference.")
+    analyze_p.add_argument("--json", action="store_true", dest="json_output", help="Output as JSON.")
 
     args = parser.parse_args(argv)
 
@@ -66,9 +67,26 @@ def _run_analyze(args: argparse.Namespace) -> int:
         booking_reference=args.booking_ref,
     )
 
-    # Print results
+    if args.json_output:
+        print(result.model_dump_json(indent=2))
+    else:
+        _print_text_report(result)
+
+    # Exit codes: 0=clean, 1=conflict, 2=needs_review, 3=processing_failure
+    if result.processing_status == ProcessingStatus.FAILED:
+        return 3
+    if result.verdict == Verdict.CONFLICT:
+        return 1
+    if result.verdict == Verdict.NEEDS_REVIEW:
+        return 2
+    return 0
+
+
+def _print_text_report(result):
+    """Print human-readable text report."""
     print(f"Booking: {result.booking_reference}")
     print(f"Status: {result.processing_status.value.upper()}")
+    print(f"Mode: {result.execution_mode.value.upper()}")
     print()
 
     if result.before.get("cy_cutoff") or result.after.get("cy_cutoff"):
@@ -79,46 +97,46 @@ def _run_analyze(args: argparse.Namespace) -> int:
             print(f"  After : {result.after['cy_cutoff']}")
         print()
 
-    # Always print aggregate verdict first
+    # Aggregate verdict
     agg_label = result.verdict.value.upper().replace("_", " ")
     print(f"VERDICT: {agg_label}")
     print()
 
-    # Then print individual findings
+    # Individual findings with plan identity
     if result.findings:
         for finding in result.findings:
-            plan_label = f" [{finding.plan_id}]" if finding.plan_id else ""
+            parts = []
+            if finding.plan_id:
+                parts.append(finding.plan_id)
+            if finding.container_reference:
+                parts.append(finding.container_reference)
+            if finding.terminal_id:
+                parts.append(finding.terminal_id)
+            label = " / ".join(parts)
             finding_label = finding.verdict.value.upper().replace("_", " ")
-            print(f"  Finding{plan_label}: {finding_label}")
+            header = f"  Finding [{label}]" if label else "  Finding"
+            print(f"{header}: {finding_label}")
             if finding.delta_hours is not None:
                 print(f"    Delta: {finding.delta_hours:+.1f}h")
             if finding.detail:
                 print(f"    Detail: {finding.detail}")
             if finding.needs_review_reasons:
-                print(f"    Review reasons: {', '.join(finding.needs_review_reasons)}")
+                print(f"    Review: {', '.join(finding.needs_review_reasons)}")
             print()
 
-    # Show evidence
+    # Evidence
     verified_evidence = [e for e in result.evidence if e.verified]
     if verified_evidence:
         print("Evidence:")
         for ev in verified_evidence:
-            print(f'  "{ev.quote}"')
+            field_label = f" ({ev.field_name})" if ev.field_name else ""
+            print(f'  "{ev.quote}"{field_label}')
         print()
 
     if result.errors:
         print("Errors:")
         for err in result.errors:
             print(f"  - {err}")
-
-    # Exit codes: 0=clean, 1=conflict, 2=needs_review, 3=processing_failure
-    if result.processing_status == ProcessingStatus.FAILED:
-        return 3
-    if result.verdict == Verdict.CONFLICT:
-        return 1
-    if result.verdict == Verdict.NEEDS_REVIEW:
-        return 2
-    return 0
 
 
 if __name__ == "__main__":
