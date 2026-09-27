@@ -1,4 +1,10 @@
-"""Core domain models for BookingGuard."""
+"""Core domain models for BookingGuard.
+
+Architecture:
+  CandidateFact → verification → VerifiedFact → state reconstruction → rule evaluation
+
+No unverified CandidateFact may reach state reconstruction or rule evaluation.
+"""
 
 from __future__ import annotations
 
@@ -44,6 +50,12 @@ class EventSemantics(str, Enum):
     UNKNOWN = "unknown"
 
 
+class ExecutionMode(str, Enum):
+    HEURISTIC = "heuristic"
+    LIVE = "live"
+    REPLAY = "replay"
+
+
 # --- Document models ---
 
 class DocumentBlock(BaseModel):
@@ -69,22 +81,26 @@ class EvidenceRef(BaseModel):
 
 
 class Scope(BaseModel):
-    type: str = "booking_all"
+    type: str = "unknown"
     container_reference: str | None = None
 
 
-class ExtractedFact(BaseModel):
+class CandidateFact(BaseModel):
+    """AI or heuristic-proposed fact. NOT yet verified for use in rule evaluation."""
     field_name: str
     value: str
-    value_role: ValueRole = ValueRole.CURRENT
-    action: Action = Action.SET
+    value_role: ValueRole = ValueRole.UNKNOWN
+    action: Action = Action.UNCERTAIN
     scope: Scope = Field(default_factory=Scope)
-    confidence: float = 1.0
+    confidence: float = 0.0
     evidence: EvidenceRef | None = None
     source_document_id: str = ""
+    extraction_method: str = ""
 
 
-# --- Evidence models ---
+# Keep backward compat alias
+ExtractedFact = CandidateFact
+
 
 class VerifiedEvidence(BaseModel):
     block_id: str
@@ -93,6 +109,19 @@ class VerifiedEvidence(BaseModel):
     char_offset: int | None = None
     duplicate_count: int = 0
     reason: str = ""
+    field_name: str = ""
+
+
+class VerifiedFact(BaseModel):
+    """Fact that has passed all verification gates. Safe for state reconstruction."""
+    field_name: str
+    value: str
+    value_role: ValueRole
+    action: Action
+    scope: Scope
+    source_document_id: str
+    verified_evidence: VerifiedEvidence | None = None
+    verification_method: str = "pipeline"
 
 
 # --- Shipment identity ---
@@ -107,7 +136,7 @@ class ShipmentIdentity(BaseModel):
 
 class BookingState(BaseModel):
     identity: ShipmentIdentity
-    facts: list[ExtractedFact] = Field(default_factory=list)
+    facts: list[VerifiedFact] = Field(default_factory=list)
     cy_cutoff: datetime | None = None
 
 
@@ -129,6 +158,9 @@ class GateInPlan(BaseModel):
 class RuleFinding(BaseModel):
     rule: str
     verdict: Verdict
+    plan_id: str = ""
+    container_reference: str = ""
+    terminal_id: str = ""
     detail: str = ""
     delta_hours: float | None = None
     needs_review_reasons: list[str] = Field(default_factory=list)
@@ -150,6 +182,7 @@ class RunResult(BaseModel):
     original_document_id: str = ""
     amendment_document_id: str = ""
     processing_status: ProcessingStatus = ProcessingStatus.COMPLETED
+    execution_mode: ExecutionMode = ExecutionMode.HEURISTIC
     before: dict[str, Any] = Field(default_factory=dict)
     after: dict[str, Any] = Field(default_factory=dict)
     findings: list[RuleFinding] = Field(default_factory=list)

@@ -1,13 +1,15 @@
 """Amendment / state reconstruction.
 
-MVP: user specifies original -> amendment relationship.
-Applies amendment facts on top of original state.
+Accepts only VerifiedFact values. CandidateFacts must be verified first.
 
 Safety rules:
 - Only value_role=CURRENT with action=SET overwrites existing state.
-- OLD/PROPOSED/CONDITIONAL/UNKNOWN value_roles are never auto-applied.
+- OLD facts are preserved as history but not applied as current.
+- A valid OLD+CURRENT pair is accepted (OLD for history, CURRENT applied).
+- PROPOSED/CONDITIONAL/UNKNOWN value_roles are never auto-applied.
 - action=UNCERTAIN is never auto-applied.
-- Container-specific scope is not applied to booking-wide state.
+- Non-booking scope is not applied to booking-wide state.
+- Conflicting values for same field+role trigger needs_review.
 """
 
 from __future__ import annotations
@@ -17,9 +19,9 @@ from datetime import datetime
 from bookingguard.domain.models import (
     Action,
     BookingState,
-    ExtractedFact,
     ShipmentIdentity,
     ValueRole,
+    VerifiedFact,
 )
 
 
@@ -31,8 +33,8 @@ class ReconstructionWarning:
 
 def reconstruct_state(
     identity: ShipmentIdentity,
-    original_facts: list[ExtractedFact],
-    amendment_facts: list[ExtractedFact],
+    original_facts: list[VerifiedFact],
+    amendment_facts: list[VerifiedFact],
 ) -> tuple[BookingState, list[ReconstructionWarning]]:
     """Reconstruct the current booking state by applying amendment on top of original.
 
@@ -40,12 +42,15 @@ def reconstruct_state(
     All other cases produce warnings and preserve the original value.
     """
     warnings: list[ReconstructionWarning] = []
-    merged: dict[str, ExtractedFact] = {}
+    merged: dict[str, VerifiedFact] = {}
+    history: list[VerifiedFact] = []
 
     # Apply original facts (only CURRENT role)
     for fact in original_facts:
         if fact.value_role == ValueRole.CURRENT:
             merged[fact.field_name] = fact
+        elif fact.value_role == ValueRole.OLD:
+            history.append(fact)
         else:
             warnings.append(
                 ReconstructionWarning(
@@ -54,27 +59,34 @@ def reconstruct_state(
                 )
             )
 
-    # Detect conflicting values within amendment for critical fields
-    amendment_values: dict[str, set[str]] = {}
+    # Detect conflicting CURRENT values within amendment
+    amendment_current: dict[str, set[str]] = {}
     for fact in amendment_facts:
-        if fact.field_name not in amendment_values:
-            amendment_values[fact.field_name] = set()
-        amendment_values[fact.field_name].add(fact.value)
+        if fact.value_role == ValueRole.CURRENT:
+            if fact.field_name not in amendment_current:
+                amendment_current[fact.field_name] = set()
+            amendment_current[fact.field_name].add(fact.value)
 
-    for field_name, values in amendment_values.items():
+    for field_name, values in amendment_current.items():
         if len(values) > 1:
             warnings.append(
                 ReconstructionWarning(
-                    reason=f"Amendment has conflicting values for '{field_name}': "
-                    f"{sorted(values)}. Cannot determine which is current.",
+                    reason=f"Amendment has conflicting CURRENT values for "
+                    f"'{field_name}': {sorted(values)}. Cannot determine "
+                    f"which is authoritative.",
                     blocking=True,
                 )
             )
 
     # Apply amendment facts with safety checks
     for fact in amendment_facts:
+        # OLD facts go to history, not current state
+        if fact.value_role == ValueRole.OLD:
+            history.append(fact)
+            continue
+
         # Reject non-CURRENT value roles
-        if fact.value_role not in (ValueRole.CURRENT,):
+        if fact.value_role != ValueRole.CURRENT:
             warnings.append(
                 ReconstructionWarning(
                     reason=f"Amendment fact '{fact.field_name}' has role "
@@ -84,7 +96,7 @@ def reconstruct_state(
             )
             continue
 
-        # Reject non-booking scope — with or without container reference
+        # Reject non-booking scope
         if fact.scope.type != "booking_all":
             warnings.append(
                 ReconstructionWarning(
@@ -108,11 +120,11 @@ def reconstruct_state(
                     blocking=True,
                 )
             )
-            # Do NOT apply — preserve original
         # UNCHANGED: keep original
 
     # Build state
-    state = BookingState(identity=identity, facts=list(merged.values()))
+    all_facts = list(merged.values()) + history
+    state = BookingState(identity=identity, facts=all_facts)
 
     # Extract cy_cutoff if present
     cutoff_fact = merged.get("cy_cutoff")

@@ -35,22 +35,28 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _read_file(path: Path, label: str) -> str | None:
+    """Read a file, printing errors for common failures."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        print(f"Error: {label} file not found: {path}", file=sys.stderr)
+    except UnicodeDecodeError as e:
+        print(f"Error: {label} file has invalid encoding: {e}", file=sys.stderr)
+    except OSError as e:
+        print(f"Error reading {label} file: {e}", file=sys.stderr)
+    return None
+
+
 def _run_analyze(args: argparse.Namespace) -> int:
-    # Handle file read errors
-    try:
-        original_text = args.original.read_text(encoding="utf-8")
-    except (FileNotFoundError, OSError) as e:
-        print(f"Error reading original file: {e}", file=sys.stderr)
+    original_text = _read_file(args.original, "original")
+    if original_text is None:
         return 3
-    try:
-        amendment_text = args.amendment.read_text(encoding="utf-8")
-    except (FileNotFoundError, OSError) as e:
-        print(f"Error reading amendment file: {e}", file=sys.stderr)
+    amendment_text = _read_file(args.amendment, "amendment")
+    if amendment_text is None:
         return 3
-    try:
-        plan_csv = args.plan.read_text(encoding="utf-8")
-    except (FileNotFoundError, OSError) as e:
-        print(f"Error reading plan file: {e}", file=sys.stderr)
+    plan_csv = _read_file(args.plan, "plan")
+    if plan_csv is None:
         return 3
 
     result = analyze_booking_change(
@@ -62,8 +68,7 @@ def _run_analyze(args: argparse.Namespace) -> int:
 
     # Print results
     print(f"Booking: {result.booking_reference}")
-    status_label = result.processing_status.value.upper()
-    print(f"Status: {status_label}")
+    print(f"Status: {result.processing_status.value.upper()}")
     print()
 
     if result.before.get("cy_cutoff") or result.after.get("cy_cutoff"):
@@ -79,11 +84,12 @@ def _run_analyze(args: argparse.Namespace) -> int:
     print(f"VERDICT: {agg_label}")
     print()
 
-    # Then print individual findings if any
+    # Then print individual findings
     if result.findings:
         for finding in result.findings:
+            plan_label = f" [{finding.plan_id}]" if finding.plan_id else ""
             finding_label = finding.verdict.value.upper().replace("_", " ")
-            print(f"  Finding: {finding_label}")
+            print(f"  Finding{plan_label}: {finding_label}")
             if finding.delta_hours is not None:
                 print(f"    Delta: {finding.delta_hours:+.1f}h")
             if finding.detail:

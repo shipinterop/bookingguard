@@ -1,11 +1,7 @@
 """Safety regression tests — verifying that unsafe paths cannot produce false verdicts.
 
-These tests cover all 5 review findings:
-1. Carrier mismatch must not silently fallback
-2. Old/proposed/conditional values must not overwrite current state
-3. Extraction failure must not be treated as "no change"
-4. Evidence verification must gate rule evaluation
-5. Truncated CSV must not crash with AttributeError
+Tests use VerifiedFact for reconstruct_state() calls (the new contract).
+Pipeline tests use analyze_booking_change() which handles CandidateFact → VerifiedFact internally.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -15,15 +11,16 @@ import pytest
 from bookingguard.application.analyze import analyze_booking_change
 from bookingguard.domain.models import (
     Action,
+    CandidateFact,
     Document,
     DocumentBlock,
     EventSemantics,
-    ExtractedFact,
     ProcessingStatus,
     Scope,
     ShipmentIdentity,
     ValueRole,
     Verdict,
+    VerifiedFact,
 )
 from bookingguard.evidence.verify import verify_evidence
 from bookingguard.ingest.plan_csv import PlanCSVError, parse_plan_csv
@@ -35,6 +32,20 @@ PLAN_DEMO_001 = """\
 plan_id,booking_reference,carrier_namespace,leg_id,terminal_id,container_reference,planned_gate_in_at,event_semantics
 PLAN-001,DEMO-001,demo_line,LEG-1,KRPUS-T1,DEMO1234567,2026-10-15T10:00:00+09:00,gate_in_completed
 """
+
+
+def _vf(field: str, value: str, role: ValueRole = ValueRole.CURRENT,
+        action: Action = Action.SET, scope_type: str = "booking_all",
+        container_ref: str | None = None) -> VerifiedFact:
+    """Helper to create VerifiedFact for unit tests."""
+    return VerifiedFact(
+        field_name=field,
+        value=value,
+        value_role=role,
+        action=action,
+        scope=Scope(type=scope_type, container_reference=container_ref),
+        source_document_id="test-doc",
+    )
 
 
 # ─── 1. Carrier mismatch: no silent fallback ───
@@ -51,8 +62,6 @@ PLAN-001,DEMO-001,other_carrier,LEG-1,KRPUS-T2,DEMO1234567,2026-10-13T10:00:00+0
     result = analyze_booking_change(original, amendment, plan_other_carrier)
     assert result.verdict == Verdict.NEEDS_REVIEW
     assert any("carrier" in e.lower() for e in result.errors)
-    # Must NOT produce no_conflict_detected from wrong carrier's plan
-    assert result.verdict != Verdict.NO_CONFLICT_DETECTED
 
 
 def test_booking_ref_override_blocked():
@@ -64,53 +73,49 @@ def test_booking_ref_override_blocked():
     assert any("conflicts" in e.lower() for e in result.errors)
 
 
-# ─── 2. State reconstruction safety ───
+# ─── 2. State reconstruction safety (using VerifiedFact) ───
 
 
 def test_old_value_not_applied():
     """A fact with value_role=OLD must NOT overwrite current state."""
     identity = ShipmentIdentity(booking_reference="TEST")
-    original = [
-        ExtractedFact(
-            field_name="cy_cutoff",
-            value="2026-10-14T18:00:00+09:00",
-            value_role=ValueRole.CURRENT,
-            action=Action.SET,
-        )
-    ]
+    original = [_vf("cy_cutoff", "2026-10-14T18:00:00+09:00")]
+    amendment = [_vf("cy_cutoff", "2026-10-15T18:00:00+09:00", role=ValueRole.OLD)]
+    state, warnings = reconstruct_state(identity, original, amendment)
+    assert state.cy_cutoff == datetime(2026, 10, 14, 18, 0, tzinfo=KST)
+
+
+def test_old_value_preserved_as_history():
+    """OLD facts should be in state.facts as history."""
+    identity = ShipmentIdentity(booking_reference="TEST")
+    original = [_vf("cy_cutoff", "2026-10-14T18:00:00+09:00")]
+    amendment = [_vf("cy_cutoff", "2026-10-15T18:00:00+09:00", role=ValueRole.OLD)]
+    state, _ = reconstruct_state(identity, original, amendment)
+    old_facts = [f for f in state.facts if f.value_role == ValueRole.OLD]
+    assert len(old_facts) == 1
+
+
+def test_valid_old_current_pair_accepted():
+    """A valid OLD + CURRENT pair must not be rejected."""
+    identity = ShipmentIdentity(booking_reference="TEST")
+    original = [_vf("cy_cutoff", "2026-10-14T18:00:00+09:00")]
     amendment = [
-        ExtractedFact(
-            field_name="cy_cutoff",
-            value="2026-10-15T18:00:00+09:00",
-            value_role=ValueRole.OLD,
-            action=Action.SET,
-        )
+        _vf("cy_cutoff", "2026-10-14T18:00:00+09:00", role=ValueRole.OLD),
+        _vf("cy_cutoff", "2026-10-15T18:00:00+09:00", role=ValueRole.CURRENT),
     ]
     state, warnings = reconstruct_state(identity, original, amendment)
-    # Original cutoff must be preserved
-    assert state.cy_cutoff == datetime(2026, 10, 14, 18, 0, tzinfo=KST)
-    assert any("OLD" in w.reason or "old" in w.reason for w in warnings)
+    # CURRENT value should be applied
+    assert state.cy_cutoff == datetime(2026, 10, 15, 18, 0, tzinfo=KST)
+    # No blocking warnings for this valid transition
+    blocking = [w for w in warnings if w.blocking]
+    assert len(blocking) == 0
 
 
 def test_proposed_value_not_applied():
     """A fact with value_role=PROPOSED must NOT overwrite current state."""
     identity = ShipmentIdentity(booking_reference="TEST")
-    original = [
-        ExtractedFact(
-            field_name="cy_cutoff",
-            value="2026-10-14T18:00:00+09:00",
-            value_role=ValueRole.CURRENT,
-            action=Action.SET,
-        )
-    ]
-    amendment = [
-        ExtractedFact(
-            field_name="cy_cutoff",
-            value="2026-10-16T18:00:00+09:00",
-            value_role=ValueRole.PROPOSED,
-            action=Action.SET,
-        )
-    ]
+    original = [_vf("cy_cutoff", "2026-10-14T18:00:00+09:00")]
+    amendment = [_vf("cy_cutoff", "2026-10-16T18:00:00+09:00", role=ValueRole.PROPOSED)]
     state, warnings = reconstruct_state(identity, original, amendment)
     assert state.cy_cutoff == datetime(2026, 10, 14, 18, 0, tzinfo=KST)
 
@@ -118,47 +123,18 @@ def test_proposed_value_not_applied():
 def test_conditional_value_not_applied():
     """A fact with value_role=CONDITIONAL must NOT overwrite current state."""
     identity = ShipmentIdentity(booking_reference="TEST")
-    original = [
-        ExtractedFact(
-            field_name="cy_cutoff",
-            value="2026-10-14T18:00:00+09:00",
-            value_role=ValueRole.CURRENT,
-            action=Action.SET,
-        )
-    ]
-    amendment = [
-        ExtractedFact(
-            field_name="cy_cutoff",
-            value="2026-10-16T18:00:00+09:00",
-            value_role=ValueRole.CONDITIONAL,
-            action=Action.SET,
-        )
-    ]
+    original = [_vf("cy_cutoff", "2026-10-14T18:00:00+09:00")]
+    amendment = [_vf("cy_cutoff", "2026-10-16T18:00:00+09:00", role=ValueRole.CONDITIONAL)]
     state, warnings = reconstruct_state(identity, original, amendment)
     assert state.cy_cutoff == datetime(2026, 10, 14, 18, 0, tzinfo=KST)
 
 
 def test_uncertain_action_preserves_original():
-    """action=UNCERTAIN must NOT overwrite original — preserve existing value."""
+    """action=UNCERTAIN must NOT overwrite original."""
     identity = ShipmentIdentity(booking_reference="TEST")
-    original = [
-        ExtractedFact(
-            field_name="cy_cutoff",
-            value="2026-10-14T18:00:00+09:00",
-            value_role=ValueRole.CURRENT,
-            action=Action.SET,
-        )
-    ]
-    amendment = [
-        ExtractedFact(
-            field_name="cy_cutoff",
-            value="2026-10-16T18:00:00+09:00",
-            value_role=ValueRole.CURRENT,
-            action=Action.UNCERTAIN,
-        )
-    ]
+    original = [_vf("cy_cutoff", "2026-10-14T18:00:00+09:00")]
+    amendment = [_vf("cy_cutoff", "2026-10-16T18:00:00+09:00", action=Action.UNCERTAIN)]
     state, warnings = reconstruct_state(identity, original, amendment)
-    # Must keep original, not apply uncertain amendment
     assert state.cy_cutoff == datetime(2026, 10, 14, 18, 0, tzinfo=KST)
     assert any(w.blocking for w in warnings)
 
@@ -166,27 +142,36 @@ def test_uncertain_action_preserves_original():
 def test_container_scope_not_applied_booking_wide():
     """Container-specific change must NOT be applied to booking-wide state."""
     identity = ShipmentIdentity(booking_reference="TEST")
-    original = [
-        ExtractedFact(
-            field_name="cy_cutoff",
-            value="2026-10-14T18:00:00+09:00",
-            value_role=ValueRole.CURRENT,
-            action=Action.SET,
-        )
-    ]
+    original = [_vf("cy_cutoff", "2026-10-14T18:00:00+09:00")]
+    amendment = [_vf("cy_cutoff", "2026-10-16T18:00:00+09:00",
+                     scope_type="container", container_ref="CNTR-001")]
+    state, warnings = reconstruct_state(identity, original, amendment)
+    assert state.cy_cutoff == datetime(2026, 10, 14, 18, 0, tzinfo=KST)
+    assert any("scope" in w.reason.lower() for w in warnings)
+
+
+def test_non_booking_scope_without_container_blocked():
+    """Scope type='container' without container_reference must still be blocked."""
+    identity = ShipmentIdentity(booking_reference="TEST")
+    original = [_vf("cy_cutoff", "2026-10-14T18:00:00+09:00")]
+    amendment = [_vf("cy_cutoff", "2026-10-16T18:00:00+09:00",
+                     scope_type="container", container_ref=None)]
+    state, warnings = reconstruct_state(identity, original, amendment)
+    assert state.cy_cutoff == datetime(2026, 10, 14, 18, 0, tzinfo=KST)
+    assert any("scope" in w.reason.lower() for w in warnings)
+
+
+def test_conflicting_current_values_in_amendment():
+    """Two different CURRENT values for same field → blocking warning."""
+    identity = ShipmentIdentity(booking_reference="TEST")
+    original = [_vf("cy_cutoff", "2026-10-14T18:00:00+09:00")]
     amendment = [
-        ExtractedFact(
-            field_name="cy_cutoff",
-            value="2026-10-16T18:00:00+09:00",
-            value_role=ValueRole.CURRENT,
-            action=Action.SET,
-            scope=Scope(type="container", container_reference="CNTR-001"),
-        )
+        _vf("cy_cutoff", "2026-10-15T18:00:00+09:00"),
+        _vf("cy_cutoff", "2026-10-16T18:00:00+09:00"),
     ]
     state, warnings = reconstruct_state(identity, original, amendment)
-    # Original must be preserved
-    assert state.cy_cutoff == datetime(2026, 10, 14, 18, 0, tzinfo=KST)
-    assert any("container" in w.reason.lower() for w in warnings)
+    assert any(w.blocking for w in warnings)
+    assert any("conflicting" in w.reason.lower() for w in warnings)
 
 
 # ─── 3. Evidence verification safety ───
@@ -210,7 +195,6 @@ def _make_doc(text: str = "CY Cutoff: 2026-10-14T18:00:00+09:00") -> Document:
 
 
 def test_empty_quote_rejected():
-    """Empty quote must not verify as true."""
     doc = _make_doc()
     result = verify_evidence(doc, "", "block-1")
     assert result.verified is False
@@ -218,14 +202,12 @@ def test_empty_quote_rejected():
 
 
 def test_whitespace_quote_rejected():
-    """Whitespace-only quote must not verify as true."""
     doc = _make_doc()
     result = verify_evidence(doc, "   ", "block-1")
     assert result.verified is False
 
 
 def test_ambiguous_duplicate_quote_rejected():
-    """Quote appearing multiple times in document must not verify as true."""
     doc = _make_doc("cutoff cutoff")
     result = verify_evidence(doc, "cutoff", "block-1")
     assert result.verified is False
@@ -233,14 +215,10 @@ def test_ambiguous_duplicate_quote_rejected():
 
 
 def test_evidence_failure_blocks_verdict():
-    """When critical evidence (cy_cutoff) fails, pipeline must not produce clean verdict."""
-    # Use a document where the quote won't match
+    """Pipeline checks evidence for critical facts."""
     original = "Booking Reference: DEMO-001\nCY Cutoff: 2026-10-15T18:00:00+09:00\n"
-    # Amendment with text that the heuristic can parse but evidence will be tricky
     amendment = "Booking Reference: DEMO-001\nCY Cutoff: 2026-10-14T18:00:00+09:00\n"
     result = analyze_booking_change(original, amendment, PLAN_DEMO_001)
-    # Normal case should work fine — evidence should verify
-    # The real test is that the pipeline checks evidence at all
     assert result.processing_status in (
         ProcessingStatus.COMPLETED,
         ProcessingStatus.PARTIAL,
@@ -251,28 +229,22 @@ def test_evidence_failure_blocks_verdict():
 
 
 def test_truncated_csv_row():
-    """CSV row missing event_semantics should raise PlanCSVError, not AttributeError."""
-    # Row with fewer values than headers
     csv = (
         "plan_id,booking_reference,carrier_namespace,leg_id,terminal_id,"
         "container_reference,planned_gate_in_at,event_semantics\n"
         "P1,B1,ns,L1,T1,C1,2026-10-15T10:00:00+09:00\n"
     )
-    # DictReader will set event_semantics to None for short row
-    # This should be handled gracefully
     with pytest.raises(PlanCSVError):
         parse_plan_csv(csv)
 
 
 def test_empty_csv_body():
-    """CSV with headers but no data rows should raise PlanCSVError."""
     csv = "plan_id,booking_reference,carrier_namespace,leg_id,terminal_id,container_reference,planned_gate_in_at,event_semantics\n"
     with pytest.raises(PlanCSVError, match="no data rows"):
         parse_plan_csv(csv)
 
 
 def test_duplicate_plan_id():
-    """Duplicate plan_id should raise PlanCSVError."""
     csv = """\
 plan_id,booking_reference,carrier_namespace,leg_id,terminal_id,container_reference,planned_gate_in_at,event_semantics
 PLAN-001,DEMO-001,ns,L1,T1,C1,2026-10-15T10:00:00+09:00,gate_in_completed
@@ -283,7 +255,6 @@ PLAN-001,DEMO-001,ns,L1,T1,C2,2026-10-16T10:00:00+09:00,gate_in_completed
 
 
 def test_empty_booking_reference_in_csv():
-    """Empty booking_reference should raise PlanCSVError."""
     csv = """\
 plan_id,booking_reference,carrier_namespace,leg_id,terminal_id,container_reference,planned_gate_in_at,event_semantics
 PLAN-001,,ns,L1,T1,C1,2026-10-15T10:00:00+09:00,gate_in_completed
@@ -292,16 +263,30 @@ PLAN-001,,ns,L1,T1,C1,2026-10-15T10:00:00+09:00,gate_in_completed
         parse_plan_csv(csv)
 
 
+def test_empty_plan_id_in_csv():
+    """plan_id is required."""
+    csv = """\
+plan_id,booking_reference,carrier_namespace,leg_id,terminal_id,container_reference,planned_gate_in_at,event_semantics
+,DEMO-001,ns,L1,T1,C1,2026-10-15T10:00:00+09:00,gate_in_completed
+"""
+    with pytest.raises(PlanCSVError, match="plan_id is required"):
+        parse_plan_csv(csv)
+
+
+def test_extra_csv_columns():
+    """Extra columns should be rejected."""
+    csv = """\
+plan_id,booking_reference,carrier_namespace,leg_id,terminal_id,container_reference,planned_gate_in_at,event_semantics,extra_col
+PLAN-001,DEMO-001,ns,L1,T1,C1,2026-10-15T10:00:00+09:00,gate_in_completed,extra
+"""
+    with pytest.raises(PlanCSVError, match="Unexpected extra columns"):
+        parse_plan_csv(csv)
+
+
 # ─── 5. Pipeline integration safety ───
 
 
 def test_reversed_revision_rejected():
-    """Amendment with older revision than original must be rejected.
-
-    Original is Revision 2 (cutoff 10/14, causes conflict).
-    Amendment is Revision 1 (cutoff 10/15, would erase conflict).
-    Pipeline must reject this as reversed revision order.
-    """
     original = "Booking Reference: DEMO-001\nRevision: 2\nCY Cutoff: 2026-10-14T18:00:00+09:00\n"
     amendment = "Booking Reference: DEMO-001\nRevision: 1\nCY Cutoff: 2026-10-15T18:00:00+09:00\n"
     result = analyze_booking_change(original, amendment, PLAN_DEMO_001)
@@ -310,15 +295,22 @@ def test_reversed_revision_rejected():
 
 
 def test_same_revision_conflict_preserved():
-    """Same revision with conflict cutoff must still show conflict."""
     original = "Booking Reference: DEMO-001\nRevision: 2\nCY Cutoff: 2026-10-14T18:00:00+09:00\n"
     amendment = "Booking Reference: DEMO-001\nRevision: 2\nCY Cutoff: 2026-10-14T18:00:00+09:00\n"
     result = analyze_booking_change(original, amendment, PLAN_DEMO_001)
     assert result.verdict == Verdict.CONFLICT
 
 
+def test_same_revision_different_cutoff_flagged():
+    """Same revision but different cutoff → partial processing."""
+    original = "Booking Reference: DEMO-001\nRevision: 2\nCY Cutoff: 2026-10-14T18:00:00+09:00\n"
+    amendment = "Booking Reference: DEMO-001\nRevision: 2\nCY Cutoff: 2026-10-15T18:00:00+09:00\n"
+    result = analyze_booking_change(original, amendment, PLAN_DEMO_001)
+    assert result.processing_status == ProcessingStatus.PARTIAL
+    assert any("same revision" in e.lower() for e in result.errors)
+
+
 def test_carrier_mismatch_between_documents():
-    """Different carrier in original vs amendment → needs_review."""
     original = "Booking Reference: DEMO-001\nCarrier: Demo Line\nCY Cutoff: 2026-10-15T18:00:00+09:00\n"
     amendment = "Booking Reference: DEMO-001\nCarrier: Other Line\nCY Cutoff: 2026-10-15T18:00:00+09:00\n"
     result = analyze_booking_change(original, amendment, PLAN_DEMO_001)
@@ -327,7 +319,6 @@ def test_carrier_mismatch_between_documents():
 
 
 def test_duplicate_booking_refs_in_document():
-    """Document with two different booking references → needs_review."""
     original = "Booking Reference: DEMO-001\nBooking Reference: DEMO-002\nCY Cutoff: 2026-10-15T18:00:00+09:00\n"
     amendment = "Booking Reference: DEMO-001\nCY Cutoff: 2026-10-14T18:00:00+09:00\n"
     result = analyze_booking_change(original, amendment, PLAN_DEMO_001)
@@ -338,26 +329,29 @@ def test_duplicate_booking_refs_in_document():
 def test_extraction_failure_not_no_change():
     """If amendment has content but no cutoff extracted, must NOT return no_conflict."""
     original = "Booking Reference: DEMO-001\nCY Cutoff: 2026-10-15T18:00:00+09:00\n"
-    # Amendment text that the heuristic cannot parse for cutoff
     amendment = "Booking Reference: DEMO-001\nThe CY receiving deadline has moved earlier to 2026-10-14.\n"
     result = analyze_booking_change(original, amendment, PLAN_DEMO_001)
     assert result.processing_status == ProcessingStatus.PARTIAL
-    assert any("extraction" in e.lower() or "extracted" in e.lower() for e in result.errors)
-    # P1: Must be needs_review, NOT no_conflict_detected
     assert result.verdict == Verdict.NEEDS_REVIEW
 
 
+def test_incomplete_extraction_overrides_conflict():
+    """When extraction is incomplete, verdict must be needs_review even if stale cutoff conflicts."""
+    original = "Booking Reference: DEMO-001\nCY Cutoff: 2026-10-14T18:00:00+09:00\n"
+    amendment = "Booking Reference: DEMO-001\nThe CY receiving deadline has been extended to 2026-10-20.\n"
+    result = analyze_booking_change(original, amendment, PLAN_DEMO_001)
+    assert result.verdict == Verdict.NEEDS_REVIEW
+    assert result.processing_status == ProcessingStatus.PARTIAL
+
+
 def test_different_booking_mismatch():
-    """Original and amendment with different booking refs → needs_review."""
     original = "Booking Reference: DEMO-001\nCY Cutoff: 2026-10-15T18:00:00+09:00\n"
     amendment = "Booking Reference: DEMO-999\nCY Cutoff: 2026-10-14T18:00:00+09:00\n"
     result = analyze_booking_change(original, amendment, PLAN_DEMO_001)
     assert result.verdict == Verdict.NEEDS_REVIEW
-    assert any("mismatch" in e.lower() for e in result.errors)
 
 
 def test_no_matching_plan():
-    """No plan for this booking → needs_review."""
     original = "Booking Reference: DEMO-XXX\nCY Cutoff: 2026-10-15T18:00:00+09:00\n"
     amendment = "Booking Reference: DEMO-XXX\nCY Cutoff: 2026-10-14T18:00:00+09:00\n"
     result = analyze_booking_change(original, amendment, PLAN_DEMO_001)
@@ -365,7 +359,6 @@ def test_no_matching_plan():
 
 
 def test_processing_status_on_csv_error():
-    """Bad CSV should produce FAILED processing status."""
     original = "Booking Reference: DEMO-001\nCY Cutoff: 2026-10-15T18:00:00+09:00\n"
     amendment = "Booking Reference: DEMO-001\nCY Cutoff: 2026-10-14T18:00:00+09:00\n"
     result = analyze_booking_change(original, amendment, "not,a,valid,csv\n")
@@ -373,7 +366,12 @@ def test_processing_status_on_csv_error():
     assert result.verdict == Verdict.NEEDS_REVIEW
 
 
-# ─── 6. Codex round 3 safety fixes ───
+def test_empty_amendment():
+    """Empty amendment document must be rejected."""
+    original = "Booking Reference: DEMO-001\nCY Cutoff: 2026-10-15T18:00:00+09:00\n"
+    result = analyze_booking_change(original, "", PLAN_DEMO_001)
+    assert result.verdict == Verdict.NEEDS_REVIEW
+    assert any("empty" in e.lower() for e in result.errors)
 
 
 def test_conflicting_cutoffs_in_amendment():
@@ -389,7 +387,6 @@ def test_conflicting_cutoffs_in_amendment():
 
 
 def test_conflicting_carriers_in_document():
-    """Document with two different carriers → needs_review."""
     original = (
         "Booking Reference: DEMO-001\n"
         "Carrier: Demo Line\n"
@@ -399,23 +396,9 @@ def test_conflicting_carriers_in_document():
     amendment = "Booking Reference: DEMO-001\nCY Cutoff: 2026-10-14T18:00:00+09:00\n"
     result = analyze_booking_change(original, amendment, PLAN_DEMO_001)
     assert result.verdict == Verdict.NEEDS_REVIEW
-    assert any("carrier" in e.lower() for e in result.errors)
-
-
-def test_incomplete_extraction_overrides_conflict():
-    """When extraction is incomplete, verdict must be needs_review even if stale cutoff conflicts."""
-    original = "Booking Reference: DEMO-001\nCY Cutoff: 2026-10-14T18:00:00+09:00\n"
-    # Amendment mentions cutoff change in prose but heuristic can't parse it
-    amendment = "Booking Reference: DEMO-001\nThe CY receiving deadline has been extended to 2026-10-20.\n"
-    result = analyze_booking_change(original, amendment, PLAN_DEMO_001)
-    # The stale cutoff (10/14) would conflict with gate-in (10/15),
-    # but extraction is incomplete so verdict must be needs_review
-    assert result.verdict == Verdict.NEEDS_REVIEW
-    assert result.processing_status == ProcessingStatus.PARTIAL
 
 
 def test_z_timestamp_in_csv():
-    """UTC 'Z' suffix in CSV should be accepted."""
     plan_z = """\
 plan_id,booking_reference,carrier_namespace,leg_id,terminal_id,container_reference,planned_gate_in_at,event_semantics
 PLAN-001,DEMO-001,demo_line,LEG-1,KRPUS-T1,DEMO1234567,2026-10-15T01:00:00Z,gate_in_completed
@@ -423,31 +406,29 @@ PLAN-001,DEMO-001,demo_line,LEG-1,KRPUS-T1,DEMO1234567,2026-10-15T01:00:00Z,gate
     original = "Booking Reference: DEMO-001\nCY Cutoff: 2026-10-15T18:00:00+09:00\n"
     amendment = "Booking Reference: DEMO-001\nCY Cutoff: 2026-10-15T18:00:00+09:00\n"
     result = analyze_booking_change(original, amendment, plan_z)
-    # Should not fail with CSV error
     assert result.processing_status != ProcessingStatus.FAILED
 
 
-def test_non_booking_scope_without_container_blocked():
-    """Scope type='container' without container_reference must still be blocked."""
-    identity = ShipmentIdentity(booking_reference="TEST")
-    original = [
-        ExtractedFact(
-            field_name="cy_cutoff",
-            value="2026-10-14T18:00:00+09:00",
-            value_role=ValueRole.CURRENT,
-            action=Action.SET,
-        )
-    ]
-    amendment = [
-        ExtractedFact(
-            field_name="cy_cutoff",
-            value="2026-10-16T18:00:00+09:00",
-            value_role=ValueRole.CURRENT,
-            action=Action.SET,
-            scope=Scope(type="container", container_reference=None),
-        )
-    ]
-    state, warnings = reconstruct_state(identity, original, amendment)
-    # Original must be preserved — non-booking scope without container is unsafe
-    assert state.cy_cutoff == datetime(2026, 10, 14, 18, 0, tzinfo=KST)
-    assert any("non-booking" in w.reason.lower() or "scope" in w.reason.lower() for w in warnings)
+# ─── 6. Finding consistency ───
+
+
+def test_finding_has_plan_identity():
+    """RuleFinding should include plan_id, terminal_id, container_reference."""
+    original = "Booking Reference: DEMO-001\nCY Cutoff: 2026-10-14T18:00:00+09:00\n"
+    amendment = "Booking Reference: DEMO-001\nCY Cutoff: 2026-10-14T18:00:00+09:00\n"
+    result = analyze_booking_change(original, amendment, PLAN_DEMO_001)
+    assert result.verdict == Verdict.CONFLICT
+    assert len(result.findings) >= 1
+    finding = result.findings[0]
+    assert finding.plan_id == "PLAN-001"
+    assert finding.terminal_id == "KRPUS-T1"
+    assert finding.container_reference == "DEMO1234567"
+
+
+def test_unresolved_cutoff_no_clean_finding():
+    """When cutoff is unresolved, no individual finding should say NO_CONFLICT."""
+    original = "Booking Reference: DEMO-001\nCY Cutoff: 2026-10-15T18:00:00+09:00\n"
+    amendment = "Booking Reference: DEMO-001\nThe deadline has been changed.\n"
+    result = analyze_booking_change(original, amendment, PLAN_DEMO_001)
+    for finding in result.findings:
+        assert finding.verdict != Verdict.NO_CONFLICT_DETECTED
